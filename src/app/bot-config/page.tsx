@@ -1,14 +1,68 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import AppLayout from '@/components/AppLayout';
-import { Bot, Save, RotateCcw, ChevronDown, ChevronUp, Info } from 'lucide-react';
+import { Bot, Save, RotateCcw, ChevronDown, ChevronUp, Info, AlertCircle, CheckCircle, Clock } from 'lucide-react';
 
 interface ConfigSection {
   id: string;
   label: string;
   open: boolean;
+  icon?: React.ReactNode;
 }
+
+interface BotConfig {
+  // Trading Parameters
+  mode: 'paper' | 'live';
+  confidenceThreshold: number;
+  minWinRate: number;
+  minRiskReward: number;
+  maxOpenPositions: number;
+  defaultLeverage: number;
+  // Execution
+  orderType: 'limit' | 'market';
+  executionWindow: number;
+  maxSlippage: number;
+  breakEvenTrigger: number;
+  maxTradeDuration: number;
+  // ML
+  primaryModel: string;
+  retrainFrequency: string;
+  featureWindow: number;
+  crossValidationFolds: number;
+  // Scanning
+  rescanInterval: number;
+  topSymbolsCount: number;
+  volumeSpike: number;
+  timeframes: string[];
+  // Additional
+  maxDrawdown: number;
+  positionSizing: 'fixed' | 'risk_based' | 'kelly';
+}
+
+const DEFAULT_CONFIG: BotConfig = {
+  mode: 'paper',
+  confidenceThreshold: 82,
+  minWinRate: 70,
+  minRiskReward: 2.5,
+  maxOpenPositions: 3,
+  defaultLeverage: 5,
+  orderType: 'limit',
+  executionWindow: 500,
+  maxSlippage: 0.05,
+  breakEvenTrigger: 1.0,
+  maxTradeDuration: 120,
+  primaryModel: 'xgboost',
+  retrainFrequency: 'weekly',
+  featureWindow: 100,
+  crossValidationFolds: 5,
+  rescanInterval: 30,
+  topSymbolsCount: 20,
+  volumeSpike: 1.5,
+  timeframes: ['5m', '15m'],
+  maxDrawdown: 20,
+  positionSizing: 'risk_based',
+};
 
 export default function BotConfigPage() {
   const [sections, setSections] = useState<ConfigSection[]>([
@@ -16,35 +70,18 @@ export default function BotConfigPage() {
     { id: 'execution', label: 'Execution Settings', open: true },
     { id: 'ml', label: 'ML Model Configuration', open: false },
     { id: 'scanning', label: 'Market Scanning', open: false },
+    { id: 'risk', label: 'Risk Management', open: false },
   ]);
 
-  const [config, setConfig] = useState({
-    // Trading Parameters
-    mode: 'paper',
-    confidenceThreshold: 82,
-    minWinRate: 70,
-    minRiskReward: 2.5,
-    maxOpenPositions: 3,
-    defaultLeverage: 5,
-    // Execution
-    orderType: 'limit',
-    executionWindow: 500,
-    maxSlippage: 0.05,
-    breakEvenTrigger: 1.0,
-    maxTradeDuration: 120,
-    // ML
-    primaryModel: 'xgboost',
-    retrainFrequency: 'weekly',
-    featureWindow: 100,
-    crossValidationFolds: 5,
-    // Scanning
-    rescanInterval: 30,
-    topSymbolsCount: 20,
-    volumeSpike: 1.5,
-    timeframes: ['5m', '15m'],
-  });
-
+  const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
   const [saved, setSaved] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
+
+  // Track changes
+  useEffect(() => {
+    setIsDirty(true);
+  }, [config]);
 
   const toggleSection = (id: string) => {
     setSections((prev) =>
@@ -52,13 +89,32 @@ export default function BotConfigPage() {
     );
   };
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  const handleSave = async () => {
+    try {
+      // Simulate API call
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      setSaved(true);
+      setSaveMessage({ type: 'success', text: 'Configuration saved successfully!' });
+      setIsDirty(false);
+      
+      setTimeout(() => {
+        setSaved(false);
+        setSaveMessage(null);
+      }, 3000);
+    } catch (error) {
+      setSaveMessage({ type: 'error', text: 'Failed to save configuration. Please try again.' });
+      setTimeout(() => setSaveMessage(null), 3000);
+    }
   };
 
   const handleReset = () => {
-    setConfig((prev) => ({ ...prev, confidenceThreshold: 82, minWinRate: 70 }));
+    if (window.confirm('Reset all configuration to default values?')) {
+      setConfig(DEFAULT_CONFIG);
+      setIsDirty(true);
+      setSaveMessage({ type: 'success', text: 'Configuration reset to defaults' });
+      setTimeout(() => setSaveMessage(null), 2000);
+    }
   };
 
   const SectionHeader = ({ id, label }: { id: string; label: string }) => {
@@ -66,13 +122,13 @@ export default function BotConfigPage() {
     return (
       <button
         onClick={() => toggleSection(id)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-muted/40 hover:bg-muted/60 rounded-t-lg transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-t-lg transition-colors"
       >
-        <span className="text-sm font-semibold text-foreground">{label}</span>
+        <span className="text-sm font-semibold text-gray-900 dark:text-white">{label}</span>
         {section?.open ? (
-          <ChevronUp size={16} className="text-muted-foreground" />
+          <ChevronUp size={16} className="text-gray-500 dark:text-gray-400" />
         ) : (
-          <ChevronDown size={16} className="text-muted-foreground" />
+          <ChevronDown size={16} className="text-gray-500 dark:text-gray-400" />
         )}
       </button>
     );
@@ -80,35 +136,78 @@ export default function BotConfigPage() {
 
   const isOpen = (id: string) => sections.find((s) => s.id === id)?.open;
 
+  const renderRangeInput = (
+    label: string,
+    key: keyof BotConfig,
+    min: number,
+    max: number,
+    step: number = 1,
+    suffix: string = '%'
+  ) => (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+        {label}
+      </label>
+      <div className="flex items-center gap-3">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={config[key] as number}
+          onChange={(e) =>
+            setConfig((c) => ({ ...c, [key]: parseFloat(e.target.value) }))
+          }
+          className="flex-1 accent-blue-600 dark:accent-blue-400"
+        />
+        <span className="text-sm font-mono font-bold text-blue-600 dark:text-blue-400 w-12 text-right">
+          {config[key]}{suffix}
+        </span>
+      </div>
+    </div>
+  );
+
   return (
     <AppLayout>
-      <div className="p-6 space-y-6 max-w-4xl mx-auto">
+      <div className="p-4 md:p-6 space-y-5 max-w-5xl mx-auto">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-primary/10">
-              <Bot size={22} className="text-primary" />
+            <div className="p-2 rounded-lg bg-blue-100 dark:bg-blue-900/30">
+              <Bot size={22} className="text-blue-600 dark:text-blue-400" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-foreground">Bot Configuration</h1>
-              <p className="text-sm text-muted-foreground">
+              <h1 className="text-xl font-bold text-gray-900 dark:text-white">
+                Bot Configuration
+              </h1>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
                 Configure trading parameters, execution settings, and ML models
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {isDirty && (
+              <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
+                <Clock size={12} />
+                Unsaved changes
+              </span>
+            )}
             <button
               onClick={handleReset}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm text-muted-foreground hover:text-foreground border border-border rounded-lg hover:bg-muted transition-colors"
+              className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             >
               <RotateCcw size={14} />
               Reset
             </button>
             <button
               onClick={handleSave}
+              disabled={!isDirty}
               className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg transition-colors ${
                 saved
-                  ? 'bg-positive text-white' :'bg-primary text-primary-foreground hover:bg-primary/90'
+                  ? 'bg-green-500 text-white'
+                  : isDirty
+                  ? 'bg-blue-600 text-white hover:bg-blue-700'
+                  : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
               }`}
             >
               <Save size={14} />
@@ -117,17 +216,43 @@ export default function BotConfigPage() {
           </div>
         </div>
 
+        {/* Save Message */}
+        {saveMessage && (
+          <div className={`p-3 rounded-lg flex items-center gap-2 ${
+            saveMessage.type === 'success' 
+              ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-400'
+              : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400'
+          }`}>
+            {saveMessage.type === 'success' ? (
+              <CheckCircle size={16} />
+            ) : (
+              <AlertCircle size={16} />
+            )}
+            <span className="text-sm">{saveMessage.text}</span>
+          </div>
+        )}
+
         {/* Mode Toggle */}
-        <div className="flex items-center gap-3 p-4 rounded-lg border border-border bg-card">
-          <span className="text-sm font-medium text-foreground">Trading Mode:</span>
-          <div className="flex rounded-lg overflow-hidden border border-border">
+        <div className="flex flex-wrap items-center gap-3 p-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/50">
+          <span className="text-sm font-medium text-gray-900 dark:text-white">
+            Trading Mode:
+          </span>
+          <div className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
             {['paper', 'live'].map((mode) => (
               <button
                 key={mode}
-                onClick={() => setConfig((c) => ({ ...c, mode }))}
+                onClick={() => {
+                  if (mode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE trading mode will use real funds. Are you sure?')) {
+                    return;
+                  }
+                  setConfig((c) => ({ ...c, mode: mode as 'paper' | 'live' }));
+                }}
                 className={`px-4 py-1.5 text-sm font-semibold capitalize transition-colors ${
                   config.mode === mode
-                    ? mode === 'live' ?'bg-negative text-white' :'bg-positive text-white' :'text-muted-foreground hover:bg-muted'
+                    ? mode === 'live' 
+                      ? 'bg-red-500 text-white' 
+                      : 'bg-green-500 text-white'
+                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
                 }`}
               >
                 {mode === 'live' ? '⚠️ Live' : '📄 Paper'}
@@ -135,108 +260,67 @@ export default function BotConfigPage() {
             ))}
           </div>
           {config.mode === 'live' && (
-            <span className="text-xs text-negative font-medium flex items-center gap-1">
+            <span className="text-xs text-red-600 dark:text-red-400 font-medium flex items-center gap-1">
               <Info size={12} /> Real funds at risk
             </span>
           )}
         </div>
 
         {/* Trading Parameters */}
-        <div className="border border-border rounded-lg overflow-hidden bg-card">
+        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
           <SectionHeader id="trading" label="Trading Parameters" />
           {isOpen('trading') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
+              {renderRangeInput('AI Confidence Threshold', 'confidenceThreshold', 70, 95)}
+              {renderRangeInput('Min Win Rate Requirement', 'minWinRate', 50, 90)}
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
-                  AI Confidence Threshold (%)
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={70}
-                    max={95}
-                    value={config.confidenceThreshold}
-                    onChange={(e) =>
-                      setConfig((c) => ({ ...c, confidenceThreshold: +e.target.value }))
-                    }
-                    className="flex-1 accent-primary"
-                  />
-                  <span className="text-sm font-mono font-bold text-primary w-10 text-right">
-                    {config.confidenceThreshold}%
-                  </span>
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
-                  Min Win Rate Requirement (%)
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={50}
-                    max={90}
-                    value={config.minWinRate}
-                    onChange={(e) =>
-                      setConfig((c) => ({ ...c, minWinRate: +e.target.value }))
-                    }
-                    className="flex-1 accent-primary"
-                  />
-                  <span className="text-sm font-mono font-bold text-primary w-10 text-right">
-                    {config.minWinRate}%
-                  </span>
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Min Risk:Reward Ratio
                 </label>
                 <select
                   value={config.minRiskReward}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, minRiskReward: +e.target.value }))
+                    setConfig((c) => ({ ...c, minRiskReward: parseFloat(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
                   {[1.5, 2.0, 2.5, 3.0, 3.5, 4.0].map((v) => (
-                    <option key={v} value={v}>
-                      1:{v}
-                    </option>
+                    <option key={v} value={v}>1:{v}</option>
                   ))}
                 </select>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Max Concurrent Positions
                 </label>
                 <select
                   value={config.maxOpenPositions}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, maxOpenPositions: +e.target.value }))
+                    setConfig((c) => ({ ...c, maxOpenPositions: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
-                  {[1, 2, 3, 4, 5].map((v) => (
-                    <option key={v} value={v}>
-                      {v} position{v > 1 ? 's' : ''}
-                    </option>
+                  {[1, 2, 3, 4, 5, 6, 8, 10].map((v) => (
+                    <option key={v} value={v}>{v} position{v > 1 ? 's' : ''}</option>
                   ))}
                 </select>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Default Leverage
                 </label>
                 <select
                   value={config.defaultLeverage}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, defaultLeverage: +e.target.value }))
+                    setConfig((c) => ({ ...c, defaultLeverage: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
-                  {[1, 2, 3, 5, 10, 15, 20].map((v) => (
-                    <option key={v} value={v}>
-                      {v}x
-                    </option>
+                  {[1, 2, 3, 5, 8, 10, 15, 20, 25, 30].map((v) => (
+                    <option key={v} value={v}>{v}x</option>
                   ))}
                 </select>
               </div>
@@ -245,23 +329,23 @@ export default function BotConfigPage() {
         </div>
 
         {/* Execution Settings */}
-        <div className="border border-border rounded-lg overflow-hidden bg-card">
+        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
           <SectionHeader id="execution" label="Execution Settings" />
           {isOpen('execution') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Order Type
                 </label>
-                <div className="flex rounded-lg overflow-hidden border border-border">
+                <div className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
                   {['limit', 'market'].map((t) => (
                     <button
                       key={t}
-                      onClick={() => setConfig((c) => ({ ...c, orderType: t }))}
+                      onClick={() => setConfig((c) => ({ ...c, orderType: t as 'limit' | 'market' }))}
                       className={`flex-1 py-2 text-sm font-medium capitalize transition-colors ${
                         config.orderType === t
-                          ? 'bg-primary text-primary-foreground'
-                          : 'text-muted-foreground hover:bg-muted'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
                       }`}
                     >
                       {t}
@@ -269,21 +353,23 @@ export default function BotConfigPage() {
                   ))}
                 </div>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Execution Window (ms)
                 </label>
                 <input
                   type="number"
                   value={config.executionWindow}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, executionWindow: +e.target.value }))
+                    setConfig((c) => ({ ...c, executionWindow: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 />
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Max Slippage (%)
                 </label>
                 <input
@@ -291,13 +377,14 @@ export default function BotConfigPage() {
                   step={0.01}
                   value={config.maxSlippage}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, maxSlippage: +e.target.value }))
+                    setConfig((c) => ({ ...c, maxSlippage: parseFloat(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 />
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Breakeven Trigger (% profit)
                 </label>
                 <input
@@ -305,22 +392,23 @@ export default function BotConfigPage() {
                   step={0.1}
                   value={config.breakEvenTrigger}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, breakEvenTrigger: +e.target.value }))
+                    setConfig((c) => ({ ...c, breakEvenTrigger: parseFloat(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 />
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Max Trade Duration (min)
                 </label>
                 <input
                   type="number"
                   value={config.maxTradeDuration}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, maxTradeDuration: +e.target.value }))
+                    setConfig((c) => ({ ...c, maxTradeDuration: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 />
               </div>
             </div>
@@ -328,12 +416,12 @@ export default function BotConfigPage() {
         </div>
 
         {/* ML Model Configuration */}
-        <div className="border border-border rounded-lg overflow-hidden bg-card">
+        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
           <SectionHeader id="ml" label="ML Model Configuration" />
           {isOpen('ml') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Primary Model
                 </label>
                 <select
@@ -341,16 +429,18 @@ export default function BotConfigPage() {
                   onChange={(e) =>
                     setConfig((c) => ({ ...c, primaryModel: e.target.value }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
                   <option value="xgboost">XGBoost</option>
                   <option value="lightgbm">LightGBM</option>
                   <option value="ensemble">XGBoost + LightGBM Ensemble</option>
                   <option value="random_forest">Random Forest</option>
+                  <option value="neural_network">Neural Network</option>
                 </select>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Retrain Frequency
                 </label>
                 <select
@@ -358,7 +448,7 @@ export default function BotConfigPage() {
                   onChange={(e) =>
                     setConfig((c) => ({ ...c, retrainFrequency: e.target.value }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
                   <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
@@ -366,34 +456,34 @@ export default function BotConfigPage() {
                   <option value="monthly">Monthly</option>
                 </select>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Feature Window (candles)
                 </label>
                 <input
                   type="number"
                   value={config.featureWindow}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, featureWindow: +e.target.value }))
+                    setConfig((c) => ({ ...c, featureWindow: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 />
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Cross-Validation Folds
                 </label>
                 <select
                   value={config.crossValidationFolds}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, crossValidationFolds: +e.target.value }))
+                    setConfig((c) => ({ ...c, crossValidationFolds: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
                   {[3, 5, 7, 10].map((v) => (
-                    <option key={v} value={v}>
-                      {v}-fold
-                    </option>
+                    <option key={v} value={v}>{v}-fold</option>
                   ))}
                 </select>
               </div>
@@ -402,43 +492,43 @@ export default function BotConfigPage() {
         </div>
 
         {/* Market Scanning */}
-        <div className="border border-border rounded-lg overflow-hidden bg-card">
+        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
           <SectionHeader id="scanning" label="Market Scanning" />
           {isOpen('scanning') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Full Rescan Interval (min)
                 </label>
                 <input
                   type="number"
                   value={config.rescanInterval}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, rescanInterval: +e.target.value }))
+                    setConfig((c) => ({ ...c, rescanInterval: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 />
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Top Symbols by Volume
                 </label>
                 <select
                   value={config.topSymbolsCount}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, topSymbolsCount: +e.target.value }))
+                    setConfig((c) => ({ ...c, topSymbolsCount: parseInt(e.target.value) }))
                   }
-                  className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
                 >
-                  {[10, 15, 20, 25, 30].map((v) => (
-                    <option key={v} value={v}>
-                      Top {v}
-                    </option>
+                  {[10, 15, 20, 25, 30, 40, 50].map((v) => (
+                    <option key={v} value={v}>Top {v}</option>
                   ))}
                 </select>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Volume Spike Multiplier
                 </label>
                 <div className="flex items-center gap-3">
@@ -449,21 +539,22 @@ export default function BotConfigPage() {
                     step={0.1}
                     value={config.volumeSpike}
                     onChange={(e) =>
-                      setConfig((c) => ({ ...c, volumeSpike: +e.target.value }))
+                      setConfig((c) => ({ ...c, volumeSpike: parseFloat(e.target.value) }))
                     }
-                    className="flex-1 accent-primary"
+                    className="flex-1 accent-blue-600 dark:accent-blue-400"
                   />
-                  <span className="text-sm font-mono font-bold text-primary w-12 text-right">
+                  <span className="text-sm font-mono font-bold text-blue-600 dark:text-blue-400 w-12 text-right">
                     {config.volumeSpike.toFixed(1)}x
                   </span>
                 </div>
               </div>
+              
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                   Active Timeframes
                 </label>
-                <div className="flex gap-2">
-                  {['1m', '5m', '15m', '1h'].map((tf) => (
+                <div className="flex flex-wrap gap-2">
+                  {['1m', '3m', '5m', '15m', '30m', '1h', '4h'].map((tf) => (
                     <button
                       key={tf}
                       onClick={() =>
@@ -471,19 +562,66 @@ export default function BotConfigPage() {
                           ...c,
                           timeframes: c.timeframes.includes(tf)
                             ? c.timeframes.filter((t) => t !== tf)
-                            : [...c.timeframes, tf],
+                            : [...c.timeframes, tf].sort(),
                         }))
                       }
                       className={`px-3 py-1.5 text-xs font-semibold rounded-md border transition-colors ${
                         config.timeframes.includes(tf)
-                          ? 'bg-primary text-primary-foreground border-primary'
-                          : 'border-border text-muted-foreground hover:bg-muted'
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
                       }`}
                     >
                       {tf}
                     </button>
                   ))}
                 </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Risk Management */}
+        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
+          <SectionHeader id="risk" label="Risk Management" />
+          {isOpen('risk') && (
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                  Max Drawdown (%)
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={5}
+                    max={40}
+                    step={1}
+                    value={config.maxDrawdown}
+                    onChange={(e) =>
+                      setConfig((c) => ({ ...c, maxDrawdown: parseInt(e.target.value) }))
+                    }
+                    className="flex-1 accent-red-500"
+                  />
+                  <span className="text-sm font-mono font-bold text-red-500 w-12 text-right">
+                    {config.maxDrawdown}%
+                  </span>
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                  Position Sizing
+                </label>
+                <select
+                  value={config.positionSizing}
+                  onChange={(e) =>
+                    setConfig((c) => ({ ...c, positionSizing: e.target.value as 'fixed' | 'risk_based' | 'kelly' }))
+                  }
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
+                >
+                  <option value="fixed">Fixed Size</option>
+                  <option value="risk_based">Risk-Based (% of capital)</option>
+                  <option value="kelly">Kelly Criterion</option>
+                </select>
               </div>
             </div>
           )}
