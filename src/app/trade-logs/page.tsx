@@ -79,6 +79,20 @@ const generateSignature = (apiSecret: string, timestamp: string, recvWindow: str
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
+// Helper to safely parse JSON response
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') {
+      return null;
+    }
+    return JSON.parse(text);
+  } catch (error) {
+    console.error('Failed to parse JSON:', error);
+    return null;
+  }
+};
+
 export default function TradeLogsPage() {
   // State
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -178,15 +192,15 @@ export default function TradeLogsPage() {
         }),
       });
 
-      const orderData = await orderResponse.json();
+      const orderData = await safeJsonParse(orderResponse);
       
-      if (orderData.retCode === 0) {
+      if (orderData && orderData.retCode === 0) {
         setError(null);
         await fetchTradeData();
         setError(`✅ Trade executed: ${tradeSide} ${selectedSymbol} @ Market`);
         setTimeout(() => setError(null), 5000);
       } else {
-        setError(`❌ Order failed: ${orderData.retMsg}`);
+        setError(`❌ Order failed: ${orderData?.retMsg || 'Unknown error'}`);
       }
     } catch (err) {
       console.error('Error executing trade:', err);
@@ -240,14 +254,14 @@ export default function TradeLogsPage() {
         }),
       });
 
-      const data = await response.json();
+      const data = await safeJsonParse(response);
       
-      if (data.retCode === 0) {
+      if (data && data.retCode === 0) {
         setError(`✅ Position closed: ${symbol}`);
         setTimeout(() => setError(null), 3000);
         await fetchTradeData();
       } else {
-        setError(`❌ Close failed: ${data.retMsg}`);
+        setError(`❌ Close failed: ${data?.retMsg || 'Unknown error'}`);
       }
     } catch (err) {
       console.error('Error closing position:', err);
@@ -272,7 +286,7 @@ export default function TradeLogsPage() {
       
       const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
       
-      // Fetch positions
+      // Fetch positions with safe parsing
       const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
         method: 'GET',
         headers: {
@@ -283,9 +297,9 @@ export default function TradeLogsPage() {
         },
       });
       
-      const positionsData = await positionsResponse.json();
+      const positionsData = await safeJsonParse(positionsResponse);
       
-      // Fetch order history
+      // Fetch order history with safe parsing
       const ordersResponse = await fetch(`${baseUrl}/v5/order/history?category=linear&limit=100`, {
         method: 'GET',
         headers: {
@@ -296,13 +310,13 @@ export default function TradeLogsPage() {
         },
       });
       
-      const ordersData = await ordersResponse.json();
+      const ordersData = await safeJsonParse(ordersResponse);
       
       // Process positions
       const newPositions: Position[] = [];
       const newTrades: Trade[] = [];
       
-      if (positionsData.retCode === 0 && positionsData.result?.list) {
+      if (positionsData && positionsData.retCode === 0 && positionsData.result?.list) {
         positionsData.result.list.forEach((pos: any) => {
           const size = parseFloat(pos.size);
           if (size !== 0) {
@@ -351,7 +365,7 @@ export default function TradeLogsPage() {
       setPositions(newPositions);
       
       // Process order history for closed trades
-      if (ordersData.retCode === 0 && ordersData.result?.list) {
+      if (ordersData && ordersData.retCode === 0 && ordersData.result?.list) {
         ordersData.result.list.forEach((order: any) => {
           if (order.orderStatus === 'Filled') {
             const side = order.side === 'Buy' ? 'LONG' : 'SHORT';
@@ -410,9 +424,9 @@ export default function TradeLogsPage() {
       const promises = SUPPORTED_SYMBOLS.map(async (symbol) => {
         try {
           const response = await fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`);
-          const data = await response.json();
+          const data = await safeJsonParse(response);
           
-          if (data.retCode === 0 && data.result?.list?.length > 0) {
+          if (data && data.retCode === 0 && data.result?.list?.length > 0) {
             const ticker = data.result.list[0];
             const isOpen = Math.random() < 0.2;
             const trade = generateDemoTrade(symbol, ticker, isOpen);

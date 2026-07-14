@@ -1,4 +1,4 @@
-// app/live-trading/page.tsx - Unified Dashboard with Navigation
+// app/live-trading/page.tsx - Unified Dashboard with Real Data Integration
 
 'use client';
 
@@ -899,6 +899,7 @@ const AnalyticsSummary = ({ metrics }: { metrics: AccountMetrics }) => {
 // ============== MAIN PAGE ==============
 export default function LiveTradingDashboardPage() {
   const router = useRouter();
+  
   // State
   const [activeTab, setActiveTab] = useState<'dashboard' | 'analytics' | 'signals' | 'alerts' | 'settings'>('dashboard');
   const [metrics, setMetrics] = useState<AccountMetrics>({
@@ -940,6 +941,8 @@ export default function LiveTradingDashboardPage() {
   const [baseEquity, setBaseEquity] = useState<number>(100);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [alertIdCounter, setAlertIdCounter] = useState(0);
+  const [paperEquity, setPaperEquity] = useState<number>(100);
+  const [liveEquity, setLiveEquity] = useState<number>(100);
 
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
@@ -1150,16 +1153,21 @@ export default function LiveTradingDashboardPage() {
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
       const hasApiKeys = apiKey && apiSecret;
       
+      // Fetch balance from API if available
       let balance = 100;
       if (hasApiKeys) {
         balance = await fetchBybitBalance();
         setActualBalance(balance);
         setIsApiConnected(true);
+        setLiveEquity(balance);
       } else {
         setIsApiConnected(false);
+        // Use paper equity for demo mode
+        setPaperEquity(prev => prev || 100);
       }
 
-      const currentBaseEquity = botStatus.mode === 'live' ? balance : 100;
+      // Determine base equity based on mode
+      const currentBaseEquity = botStatus.mode === 'live' ? balance : (paperEquity || 100);
       setBaseEquity(currentBaseEquity);
 
       // Fetch ticker data
@@ -1242,7 +1250,7 @@ export default function LiveTradingDashboardPage() {
         }
       }
 
-      // Process ticker data
+      // Process ticker data for signals and paper trades
       tickerResults.forEach((result: any) => {
         if (result && result.retCode === 0 && result.result?.list?.length > 0) {
           const ticker = result.result.list[0];
@@ -1254,12 +1262,12 @@ export default function LiveTradingDashboardPage() {
           avgChange += change24h;
           validCount++;
 
-          // Paper mode simulation
-          if (botStatus.mode === 'paper' && !hasApiKeys) {
+          // Paper mode simulation - generate positions and trades
+          if (botStatus.mode === 'paper' || !hasApiKeys) {
             const volatility = Math.abs(change24h);
-            const hasPosition = volatility > 1.5 && Math.random() < 0.15;
             
-            if (hasPosition) {
+            // Generate paper positions
+            if (volatility > 1.5 && Math.random() < 0.15) {
               openPositionsCount++;
               const isLong = change24h > 0;
               const entryPrice = price * (1 + (Math.random() - 0.5) * 0.01);
@@ -1285,6 +1293,31 @@ export default function LiveTradingDashboardPage() {
               
               totalEquity += pnl;
               dailyPnl += pnl;
+            }
+
+            // Generate paper trades (closed positions)
+            if (Math.random() < 0.08) {
+              const pnl = (Math.random() - 0.4) * 1.5;
+              const side = pnl > 0 ? 'LONG' : 'SHORT';
+              const entryPrice = price * (1 + (Math.random() - 0.5) * 0.02);
+              const exitPrice = price * (1 + (Math.random() - 0.5) * 0.02);
+              
+              newTrades.push({
+                id: `trade-${symbol}-${Date.now()}`,
+                symbol,
+                side,
+                entryPrice: Math.round(entryPrice * 100) / 100,
+                exitPrice: Math.round(exitPrice * 100) / 100,
+                size: 0.001 + Math.random() * 0.002,
+                pnl: Math.round((pnl * 0.5) * 100) / 100,
+                pnlPct: Math.round(pnl * 10) / 10,
+                entryTime: new Date(Date.now() - Math.random() * 3600000).toLocaleTimeString(),
+                exitTime: new Date().toLocaleTimeString(),
+                exitReason: pnl > 0 ? 'TP_HIT' : 'SL_HIT',
+                status: 'closed',
+                leverage: 5,
+                confidence: Math.round(60 + Math.random() * 30),
+              });
             }
           }
 
@@ -1330,29 +1363,13 @@ export default function LiveTradingDashboardPage() {
               );
             }
           }
-
-          // Generate paper trade
-          if (botStatus.mode === 'paper' && !hasApiKeys && Math.random() < 0.1) {
-            const pnl = (Math.random() - 0.4) * 1.5;
-            newTrades.push({
-              id: `trade-${symbol}-${Date.now()}`,
-              symbol,
-              side: pnl > 0 ? 'LONG' : 'SHORT',
-              entryPrice: price * (1 + (Math.random() - 0.5) * 0.02),
-              exitPrice: price * (1 + (Math.random() - 0.5) * 0.02),
-              size: 0.001 + Math.random() * 0.002,
-              pnl: pnl * 0.5,
-              pnlPct: pnl,
-              entryTime: new Date(Date.now() - Math.random() * 3600000).toLocaleTimeString(),
-              exitTime: new Date().toLocaleTimeString(),
-              exitReason: pnl > 0 ? 'TP_HIT' : 'SL_HIT',
-              status: 'closed',
-              leverage: 5,
-              confidence: 60 + Math.random() * 30,
-            });
-          }
         }
       });
+
+      // Update paper equity
+      if (botStatus.mode === 'paper' || !hasApiKeys) {
+        setPaperEquity(totalEquity);
+      }
 
       // Update metrics
       setMetrics({
@@ -1373,8 +1390,11 @@ export default function LiveTradingDashboardPage() {
       setPositions(newPositions);
       setSignals(prev => [...newSignals, ...prev].slice(0, 50));
       setTrades(prev => [...newTrades, ...prev].slice(0, 50));
+      
+      // Update equity data - use the appropriate equity based on mode
+      const currentEquity = botStatus.mode === 'live' ? balance : totalEquity;
       setEquityData(prev => {
-        const newData = [...prev, totalEquity];
+        const newData = [...prev, currentEquity];
         return newData.slice(-90);
       });
       
@@ -1632,7 +1652,7 @@ export default function LiveTradingDashboardPage() {
           <span>
             {botStatus.mode === 'live' 
               ? `Live Balance: $${actualBalance.toFixed(2)}` 
-              : `${SUPPORTED_SYMBOLS.length} symbols monitored`}
+              : `Paper Equity: $${paperEquity.toFixed(2)}`}
           </span>
           <span className="text-gray-300 dark:text-gray-600">|</span>
           <span className="flex items-center gap-1">
@@ -1717,6 +1737,11 @@ export default function LiveTradingDashboardPage() {
                       );
                     })}
                   </div>
+                </div>
+                <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  <span>{botStatus.mode === 'paper' ? 'Paper Trading' : 'Live Trading'}</span>
+                  <span>Base: ${baseEquity.toFixed(2)}</span>
+                  <span>Current: ${equityData[equityData.length - 1]?.toFixed(2) || '0'}</span>
                 </div>
               </div>
 
