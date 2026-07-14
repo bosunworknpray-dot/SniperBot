@@ -1,4 +1,3 @@
-// SymbolSelectorPanel.tsx
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -9,6 +8,7 @@ interface SymbolData {
   name: string;
   category: string;
   volume: string;
+  volumeRaw: number;
   price: string;
   change24h: string;
 }
@@ -18,9 +18,47 @@ const CATEGORY_COLORS: Record<string, string> = {
   'Meme': 'bg-warning-subtle text-warning',
   'Alt': 'bg-info-subtle text-info',
   'L2': 'bg-positive-subtle text-positive',
+  'DeFi': 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+  'AI': 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400',
+  'Gaming': 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-400',
 };
 
-const DEFAULT_SELECTED = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+// Common categories based on symbol
+const getSymbolCategory = (symbol: string): string => {
+  const base = symbol.replace('USDT', '').replace('USDC', '');
+  
+  // Major cryptos
+  if (['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'DOT', 'LINK', 'AVAX'].includes(base)) {
+    return 'Major';
+  }
+  
+  // Meme coins
+  if (['DOGE', 'SHIB', 'PEPE', 'FLOKI', 'BONK', 'WIF', 'MEME'].includes(base)) {
+    return 'Meme';
+  }
+  
+  // Layer 2
+  if (['ARB', 'OP', 'MATIC', 'BASE', 'STRK', 'MNT'].includes(base)) {
+    return 'L2';
+  }
+  
+  // DeFi
+  if (['UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'RUNE', 'INJ', 'JUP'].includes(base)) {
+    return 'DeFi';
+  }
+  
+  // AI
+  if (['FET', 'AGIX', 'OCEAN', 'RNDR', 'WLD', 'TAO'].includes(base)) {
+    return 'AI';
+  }
+  
+  // Gaming
+  if (['GALA', 'SAND', 'MANA', 'AXS', 'IMX', 'FLOW'].includes(base)) {
+    return 'Gaming';
+  }
+  
+  return 'Alt';
+};
 
 export default function SymbolSelectorPanel() {
   const [selected, setSelected] = useState<string[]>(DEFAULT_SELECTED);
@@ -29,6 +67,7 @@ export default function SymbolSelectorPanel() {
   const [symbols, setSymbols] = useState<SymbolData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     const fetchSymbols = async () => {
@@ -36,43 +75,37 @@ export default function SymbolSelectorPanel() {
       setError(null);
       
       try {
+        // Fetch USDT perpetuals
         const response = await fetch('https://api.bybit.com/v5/market/tickers?category=linear');
         const data = await response.json();
         
         if (data.retCode === 0 && data.result?.list) {
           const tickers = data.result.list;
           
-          const mappedSymbols: SymbolData[] = tickers.map((ticker: any) => {
-            const volume = parseFloat(ticker.volume24h) || 0;
-            const price = parseFloat(ticker.lastPrice) || 0;
-            const change24h = parseFloat(ticker.price24hPcnt) * 100 || 0;
-            
-            let category = 'Alt';
-            const symbol = ticker.symbol;
-            if (['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'].includes(symbol)) {
-              category = 'Major';
-            } else if (['DOGEUSDT', 'SHIBUSDT', 'PEPEUSDT'].includes(symbol)) {
-              category = 'Meme';
-            } else if (['ARBUSDT', 'OPUSDT'].includes(symbol)) {
-              category = 'L2';
-            }
-            
-            return {
-              symbol: symbol,
-              name: symbol.replace('USDT', '').replace('USDC', ''),
-              category: category,
-              volume: `$${(volume / 1e6).toFixed(1)}M`,
-              price: price.toFixed(2),
-              change24h: change24h.toFixed(2) + '%',
-            };
-          });
+          // Map all symbols with volume data
+          const mappedSymbols: SymbolData[] = tickers
+            .filter((ticker: any) => ticker.symbol.endsWith('USDT'))
+            .map((ticker: any) => {
+              const volume = parseFloat(ticker.volume24h) || 0;
+              const price = parseFloat(ticker.lastPrice) || 0;
+              const change24h = parseFloat(ticker.price24hPcnt) * 100 || 0;
+              const symbol = ticker.symbol;
+              
+              return {
+                symbol: symbol,
+                name: symbol.replace('USDT', '').replace('USDC', ''),
+                category: getSymbolCategory(symbol),
+                volume: `$${(volume / 1e6).toFixed(1)}M`,
+                volumeRaw: volume,
+                price: price > 1 ? price.toFixed(2) : price.toFixed(4),
+                change24h: change24h.toFixed(2) + '%',
+              };
+            })
+            .sort((a, b) => b.volumeRaw - a.volumeRaw);
           
-          const usdtPairs = mappedSymbols
-            .filter(s => s.symbol.endsWith('USDT'))
-            .sort((a, b) => parseFloat(b.volume) - parseFloat(a.volume))
-            .slice(0, 50);
-          
-          setSymbols(usdtPairs);
+          // Show top 50 by default, allow showing all
+          const topSymbols = showAll ? mappedSymbols : mappedSymbols.slice(0, 50);
+          setSymbols(topSymbols);
         } else {
           throw new Error(data.retMsg || 'Failed to fetch symbols');
         }
@@ -85,7 +118,7 @@ export default function SymbolSelectorPanel() {
     };
     
     fetchSymbols();
-  }, []);
+  }, [showAll]);
 
   const filtered = symbols.filter(
     (s) =>
@@ -107,7 +140,24 @@ export default function SymbolSelectorPanel() {
   const handleSave = () => {
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
+    // Store selected symbols in localStorage
+    localStorage.setItem('selected_symbols', JSON.stringify(selected));
   };
+
+  // Load saved selections
+  useEffect(() => {
+    const savedSymbols = localStorage.getItem('selected_symbols');
+    if (savedSymbols) {
+      try {
+        const parsed = JSON.parse(savedSymbols);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setSelected(parsed);
+        }
+      } catch (e) {
+        // Ignore
+      }
+    }
+  }, []);
 
   if (isLoading) {
     return (
@@ -128,11 +178,21 @@ export default function SymbolSelectorPanel() {
         </div>
         <div>
           <h2 className="text-foreground font-semibold text-sm">Target Symbols</h2>
-          <p className="text-muted-foreground text-xs mt-0.5">Select up to 20 futures pairs to scan</p>
+          <p className="text-muted-foreground text-xs mt-0.5">
+            {showAll ? `All ${symbols.length} pairs` : `Top 50 by volume`}
+          </p>
         </div>
-        <div className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-muted text-xs font-mono text-muted-foreground">
-          <Star size={11} className="text-warning" />
-          {selected.length}/20
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => setShowAll(!showAll)}
+            className="text-[10px] font-medium px-2 py-1 rounded bg-muted hover:bg-muted/80 transition-colors"
+          >
+            {showAll ? 'Show Top 50' : 'Show All'}
+          </button>
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-muted text-xs font-mono text-muted-foreground">
+            <Star size={11} className="text-warning" />
+            {selected.length}/20
+          </div>
         </div>
       </div>
 
@@ -166,7 +226,7 @@ export default function SymbolSelectorPanel() {
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search symbols..."
+          placeholder={`Search ${symbols.length} symbols...`}
           className="w-full bg-background border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
         />
       </div>
@@ -206,8 +266,21 @@ export default function SymbolSelectorPanel() {
           })
         ) : (
           <div className="col-span-2 text-center py-8 text-muted-foreground text-sm">
-            No symbols found
+            No symbols found matching "{search}"
           </div>
+        )}
+      </div>
+
+      {/* Show count */}
+      <div className="flex justify-between items-center mt-2 text-[10px] text-muted-foreground">
+        <span>Showing {filtered.length} of {symbols.length} symbols</span>
+        {!showAll && symbols.length > 50 && (
+          <button
+            onClick={() => setShowAll(true)}
+            className="text-primary hover:underline"
+          >
+            Show all {symbols.length} symbols
+          </button>
         )}
       </div>
 

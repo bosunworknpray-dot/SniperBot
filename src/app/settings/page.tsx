@@ -25,6 +25,7 @@ interface SymbolConfig {
   price: string;
   volume24h: string;
   change24h: string;
+  volumeRaw: number;
 }
 
 interface WebSocketConfig {
@@ -59,9 +60,11 @@ const BYBIT_WS = {
 };
 
 // ============== UTILITY FUNCTIONS ==============
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+// FIXED: Correct signature generation for Bybit API
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  // Bybit signature format: timestamp + apiKey + recvWindow + params
+  const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -111,7 +114,8 @@ const ApiCredentialsPanel = () => {
     const params = '';
 
     try {
-      const signature = generateSignature(credentials.apiSecret, timestamp, recvWindow, params);
+      // FIXED: Pass apiKey as part of signature payload
+      const signature = generateSignature(credentials.apiKey, credentials.apiSecret, timestamp, recvWindow, params);
       
       const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
         method: 'GET',
@@ -349,12 +353,13 @@ const ApiCredentialsPanel = () => {
   );
 };
 
-// Symbol Selector Panel
+// Symbol Selector Panel - Updated to fetch top 100 symbols by volume
 const SymbolSelectorPanel = () => {
   const [symbols, setSymbols] = useState<SymbolConfig[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   const fetchSymbols = useCallback(async () => {
     setIsLoading(true);
@@ -368,20 +373,27 @@ const SymbolSelectorPanel = () => {
         const tickers = data.result.list;
         const defaultEnabled = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
         
+        // Map all USDT pairs with volume data
         const mappedSymbols: SymbolConfig[] = tickers
           .filter((t: any) => t.symbol.endsWith('USDT'))
-          .slice(0, 30)
-          .map((t: any) => ({
-            symbol: t.symbol,
-            enabled: defaultEnabled.includes(t.symbol),
-            baseAsset: t.symbol.replace('USDT', ''),
-            quoteAsset: 'USDT',
-            price: parseFloat(t.lastPrice).toFixed(2),
-            volume24h: `$${(parseFloat(t.volume24h) / 1e6).toFixed(1)}M`,
-            change24h: `${(parseFloat(t.price24hPcnt) * 100).toFixed(2)}%`,
-          }));
+          .map((t: any) => {
+            const volume = parseFloat(t.volume24h) || 0;
+            return {
+              symbol: t.symbol,
+              enabled: defaultEnabled.includes(t.symbol),
+              baseAsset: t.symbol.replace('USDT', ''),
+              quoteAsset: 'USDT',
+              price: parseFloat(t.lastPrice).toFixed(2),
+              volume24h: `$${(volume / 1e6).toFixed(1)}M`,
+              change24h: `${(parseFloat(t.price24hPcnt) * 100).toFixed(2)}%`,
+              volumeRaw: volume,
+            };
+          })
+          .sort((a, b) => b.volumeRaw - a.volumeRaw);
 
-        setSymbols(mappedSymbols);
+        // Show top 50 by default, or all if showAll is true
+        const topSymbols = showAll ? mappedSymbols : mappedSymbols.slice(0, 50);
+        setSymbols(topSymbols);
       } else {
         throw new Error(data.retMsg || 'Failed to fetch symbols');
       }
@@ -390,7 +402,7 @@ const SymbolSelectorPanel = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [showAll]);
 
   useEffect(() => {
     fetchSymbols();
@@ -431,9 +443,17 @@ const SymbolSelectorPanel = () => {
           <Network size={16} className="text-green-600 dark:text-green-400" />
           Trading Symbols
         </h3>
-        <span className="text-xs text-gray-500 dark:text-gray-400">
-          {enabledCount} / {symbols.length} enabled
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
+            {enabledCount} / {symbols.length} enabled
+          </span>
+          <button
+            onClick={() => setShowAll(!showAll)}
+            className="text-[10px] font-medium px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+          >
+            {showAll ? 'Show Top 50' : 'Show All'}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -452,7 +472,7 @@ const SymbolSelectorPanel = () => {
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search symbols..."
+            placeholder={`Search ${symbols.length} symbols...`}
             className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
           />
         </div>
@@ -465,42 +485,59 @@ const SymbolSelectorPanel = () => {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-48 overflow-y-auto">
-        {filteredSymbols.map((symbol) => (
-          <button
-            key={symbol.symbol}
-            onClick={() => toggleSymbol(symbol.symbol)}
-            className={`flex flex-col items-start p-2 rounded-lg border transition-all ${
-              symbol.enabled
-                ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
-                : 'bg-gray-50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
-            }`}
-          >
-            <div className="flex items-center justify-between w-full">
-              <span className={`text-xs font-medium ${
-                symbol.enabled ? 'text-blue-700 dark:text-blue-400' : 'text-gray-600 dark:text-gray-400'
-              }`}>
-                {symbol.symbol}
-              </span>
-              {symbol.enabled ? (
-                <CheckCircle size={12} className="text-blue-600 dark:text-blue-400" />
-              ) : (
-                <div className="w-3 h-3 rounded-full border border-gray-300 dark:border-gray-600" />
-              )}
-            </div>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-[9px] text-gray-500 dark:text-gray-400">{symbol.price}</span>
-              <span className={`text-[9px] ${
-                parseFloat(symbol.change24h) >= 0 ? 'text-green-600' : 'text-red-600'
-              }`}>
-                {symbol.change24h}
-              </span>
-            </div>
-          </button>
-        ))}
+        {filteredSymbols.length > 0 ? (
+          filteredSymbols.map((symbol) => (
+            <button
+              key={symbol.symbol}
+              onClick={() => toggleSymbol(symbol.symbol)}
+              className={`flex flex-col items-start p-2 rounded-lg border transition-all ${
+                symbol.enabled
+                  ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
+                  : 'bg-gray-50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              <div className="flex items-center justify-between w-full">
+                <span className={`text-xs font-medium ${
+                  symbol.enabled ? 'text-blue-700 dark:text-blue-400' : 'text-gray-600 dark:text-gray-400'
+                }`}>
+                  {symbol.symbol}
+                </span>
+                {symbol.enabled ? (
+                  <CheckCircle size={12} className="text-blue-600 dark:text-blue-400" />
+                ) : (
+                  <div className="w-3 h-3 rounded-full border border-gray-300 dark:border-gray-600" />
+                )}
+              </div>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-[9px] text-gray-500 dark:text-gray-400">{symbol.price}</span>
+                <span className={`text-[9px] ${
+                  parseFloat(symbol.change24h) >= 0 ? 'text-green-600' : 'text-red-600'
+                }`}>
+                  {symbol.change24h}
+                </span>
+                <span className="text-[9px] text-gray-400 dark:text-gray-500">{symbol.volume24h}</span>
+              </div>
+            </button>
+          ))
+        ) : (
+          <div className="col-span-4 text-center py-8 text-gray-500 dark:text-gray-400 text-sm">
+            No symbols found matching "{searchTerm}"
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500">
-        <span>Base: {symbols.filter(s => s.enabled).map(s => s.baseAsset).join(', ') || 'None'}</span>
+        <span>
+          Showing {filteredSymbols.length} of {symbols.length} symbols
+          {!showAll && symbols.length > 50 && (
+            <button
+              onClick={() => setShowAll(true)}
+              className="ml-2 text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Show all {symbols.length}
+            </button>
+          )}
+        </span>
         <span>Quote: USDT</span>
       </div>
     </div>

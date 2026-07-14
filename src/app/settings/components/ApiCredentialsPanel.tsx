@@ -23,11 +23,11 @@ const BYBIT_API = {
   live: 'https://api.bybit.com',
 };
 
-// Helper to generate Bybit signature
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+// Fixed: Correct Bybit signature generation
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
   // Bybit signature format: timestamp + apiKey + recvWindow + params
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  const paramStr = timestamp + apiKey + recvWindow + params;
   console.log('Signature payload:', paramStr);
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
@@ -65,7 +65,8 @@ export default function ApiCredentialsPanel() {
       // For GET request without parameters, params is empty string
       const params = '';
 
-      const signature = generateSignature(creds.apiSecret, timestamp, recvWindow, params);
+      // FIXED: Pass apiKey as part of signature payload
+      const signature = generateSignature(creds.apiKey, creds.apiSecret, timestamp, recvWindow, params);
 
       console.log('Testing connection with:', {
         url: `${BYBIT_API[mode]}/v5/account/wallet-balance`,
