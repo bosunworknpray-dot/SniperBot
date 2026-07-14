@@ -1,13 +1,18 @@
+// app/live-trading/page.tsx - Unified Dashboard with Navigation
+
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
   Zap, Wifi, WifiOff, RefreshCw, AlertCircle,
-  CheckCircle, XCircle, Clock, Wallet, BarChart3,
-  Play, Pause, StopCircle, Settings, Bell,
-  ArrowUp, ArrowDown, Minus, Loader2, X, Plus
+  Wallet, BarChart3, Play, StopCircle, Settings, 
+  Loader2, X, Plus, Minus, Shield, Bell, Bot,
+  ChevronDown, ChevronUp, Clock, Calendar, Database,
+  CheckCircle, Server, Network, Sparkles, ExternalLink,
+  LayoutDashboard, FileText, ArrowRight
 } from 'lucide-react';
 
 // ============== TYPES ==============
@@ -56,10 +61,12 @@ interface Signal {
   tp2: number;
   rr: number;
   timeframe: string;
-  status: 'pending' | 'live' | 'rejected';
+  status: 'pending' | 'live' | 'rejected' | 'executed';
   generatedAt: string;
   change24h: number;
   volume: number;
+  regime: string;
+  signalSource: 'ml' | 'technical' | 'hybrid';
 }
 
 interface Trade {
@@ -74,9 +81,22 @@ interface Trade {
   entryTime: string;
   exitTime: string;
   exitReason: string;
-  orderId?: string;
-  positionIdx?: number;
   status: 'open' | 'closed';
+  leverage: number;
+  confidence: number;
+}
+
+interface Alert {
+  id: string;
+  type: 'signal' | 'trade' | 'risk' | 'system';
+  priority: 'high' | 'medium' | 'low';
+  title: string;
+  message: string;
+  time: string;
+  read: boolean;
+  timestamp: number;
+  symbol?: string;
+  price?: number;
 }
 
 interface BotStatus {
@@ -88,14 +108,12 @@ interface BotStatus {
   uptime: string;
 }
 
-// ============== BYBIT API CONFIGURATION ==============
+// ============== BYBIT API ==============
 const BYBIT_API = {
   spot: 'https://api.bybit.com/v5/market/tickers',
   positions: 'https://api.bybit.com/v5/position/list',
-  orderHistory: 'https://api.bybit.com/v5/order/history',
-  placeOrder: 'https://api.bybit.com/v5/order/create',
-  setLeverage: 'https://api.bybit.com/v5/position/set-leverage',
   wallet: 'https://api.bybit.com/v5/account/wallet-balance',
+  kline: 'https://api.bybit.com/v5/market/kline',
 };
 
 const BYBIT_WS = {
@@ -104,45 +122,78 @@ const BYBIT_WS = {
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT'];
 
-// Helper to generate Bybit signature
+// ============== HELPERS ==============
 const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  // Bybit signature format: timestamp + apiKey + recvWindow + params
-  const signaturePayload = timestamp + apiSecret + recvWindow + params;
-  return crypto.createHmac('sha256', apiSecret).update(signaturePayload).digest('hex');
+  const paramStr = timestamp + apiSecret + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
-// Helper to safely parse JSON response
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
-    if (!text || text.trim() === '') {
-      return null;
-    }
+    if (!text || text.trim() === '') return null;
     return JSON.parse(text);
-  } catch (error) {
-    console.error('Failed to parse JSON:', error);
+  } catch {
     return null;
   }
 };
 
 // ============== COMPONENTS ==============
 
+// Navigation Buttons
+const PageNavigation = () => {
+  const router = useRouter();
+  
+  const pages = [
+    { path: '/live-trading', label: 'Dashboard', icon: <LayoutDashboard size={14} /> },
+    { path: '/performance-analytics', label: 'Analytics', icon: <BarChart3 size={14} /> },
+    { path: '/trade-logs', label: 'Trade Logs', icon: <FileText size={14} /> },
+    { path: '/signal-engine', label: 'Signal Engine', icon: <Zap size={14} /> },
+    { path: '/risk-rules', label: 'Risk Rules', icon: <Shield size={14} /> },
+    { path: '/alerts', label: 'Alerts', icon: <Bell size={14} /> },
+    { path: '/settings', label: 'Settings', icon: <Settings size={14} /> },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 p-3 bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg mb-4">
+      <span className="text-xs font-medium text-gray-500 dark:text-gray-400 mr-2">Pages:</span>
+      {pages.map((page) => (
+        <button
+          key={page.path}
+          onClick={() => router.push(page.path)}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+            typeof window !== 'undefined' && window.location.pathname === page.path
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700'
+          }`}
+        >
+          {page.icon}
+          {page.label}
+        </button>
+      ))}
+    </div>
+  );
+};
+
 // Dashboard Header
-const DashboardHeader = ({ botStatus, onRefresh, connectionStatus, isApiConnected }: { 
-  botStatus: BotStatus; 
+const DashboardHeader = ({ 
+  botStatus, 
+  onRefresh, 
+  connectionStatus, 
+  isApiConnected,
+  isRefreshing,
+  activeTab,
+  setActiveTab
+}: { 
+  botStatus: BotStatus;
   onRefresh: () => void;
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   isApiConnected: boolean;
+  isRefreshing: boolean;
+  activeTab: 'dashboard' | 'analytics' | 'signals' | 'alerts' | 'settings';
+  setActiveTab: (tab: 'dashboard' | 'analytics' | 'signals' | 'alerts' | 'settings') => void;
 }) => {
-  const [isRefreshing, setIsRefreshing] = useState(false);
-
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    onRefresh();
-    setTimeout(() => setIsRefreshing(false), 1000);
-  };
-
   const getConnectionIcon = () => {
     switch (connectionStatus) {
       case 'connected': return <Wifi size={14} className="text-green-500" />;
@@ -152,51 +203,79 @@ const DashboardHeader = ({ botStatus, onRefresh, connectionStatus, isApiConnecte
     }
   };
 
+  const tabs = [
+    { id: 'dashboard', label: 'Dashboard', icon: <Activity size={16} /> },
+    { id: 'analytics', label: 'Analytics', icon: <BarChart3 size={16} /> },
+    { id: 'signals', label: 'Signals', icon: <Zap size={16} /> },
+    { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
+    { id: 'settings', label: 'Settings', icon: <Settings size={16} /> },
+  ];
+
   return (
-    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-          <Activity size={24} className="text-blue-600 dark:text-blue-400" />
-          Live Trading Dashboard
-        </h1>
-        <div className="flex items-center gap-3 mt-1">
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Real-time trading monitoring from Bybit
-          </p>
-          <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
-            botStatus.isRunning 
-              ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
-          }`}>
-            <div className={`w-1.5 h-1.5 rounded-full ${botStatus.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-            {botStatus.isRunning ? 'Active' : 'Stopped'}
-          </div>
-          {isApiConnected && (
-            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
-              ● API Connected
+    <div className="flex flex-col gap-4 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+            <Activity size={24} className="text-blue-600 dark:text-blue-400" />
+            Live Trading Dashboard
+          </h1>
+          <div className="flex items-center gap-3 mt-1 flex-wrap">
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              Real-time trading & performance monitoring from Bybit
+            </p>
+            <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
+              botStatus.isRunning 
+                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+            }`}>
+              <div className={`w-1.5 h-1.5 rounded-full ${botStatus.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+              {botStatus.isRunning ? 'Active' : 'Stopped'}
+            </div>
+            {isApiConnected && (
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
+                ● API Connected
+              </span>
+            )}
+            <span className="flex items-center gap-1 text-xs text-gray-500">
+              {getConnectionIcon()}
+              {connectionStatus}
             </span>
-          )}
-          <span className="flex items-center gap-1 text-xs text-gray-500">
-            {getConnectionIcon()}
-            {connectionStatus}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-xs px-3 py-1.5 rounded-lg ${
+            botStatus.mode === 'live' 
+              ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400' 
+              : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
+          }`}>
+            {botStatus.mode === 'live' ? '⚠️ LIVE MODE' : '📄 PAPER MODE'}
           </span>
+          <button
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={`text-gray-600 dark:text-gray-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+          </button>
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <span className={`text-xs px-3 py-1.5 rounded-lg ${
-          botStatus.mode === 'live' 
-            ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400' 
-            : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
-        }`}>
-          {botStatus.mode === 'live' ? '⚠️ LIVE MODE' : '📄 PAPER MODE'}
-        </span>
-        <button
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
-        >
-          <RefreshCw size={16} className={`text-gray-600 dark:text-gray-400 ${isRefreshing ? 'animate-spin' : ''}`} />
-        </button>
+      
+      {/* Tab Navigation */}
+      <div className="flex flex-wrap gap-1 border-b border-gray-200 dark:border-gray-700 pb-3">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id as any)}
+            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+              activeTab === tab.id
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+            }`}
+          >
+            {tab.icon}
+            {tab.label}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -217,9 +296,7 @@ const QuickTradeForm = ({
   const [tradeSize, setTradeSize] = useState(0.001);
   const [tradeLeverage, setTradeLeverage] = useState(5);
 
-  if (!isApiConnected) {
-    return null;
-  }
+  if (!isApiConnected) return null;
 
   return (
     <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
@@ -300,7 +377,7 @@ const QuickTradeForm = ({
 };
 
 // Live Metric Cards
-const LiveMetricCards = ({ metrics, mode }: { metrics: AccountMetrics; mode?: 'paper' | 'live' }) => {
+const LiveMetricCards = ({ metrics }: { metrics: AccountMetrics }) => {
   const cards = [
     { 
       label: 'Total Equity', 
@@ -352,17 +429,17 @@ const LiveMetricCards = ({ metrics, mode }: { metrics: AccountMetrics; mode?: 'p
   );
 };
 
-// Equity Sparkline
-const EquitySparkline = ({ equityData, mode = 'paper', baseEquity = 100 }: { 
+// Equity Curve
+const EquityCurve = ({ equityData, mode, baseEquity }: { 
   equityData: number[]; 
-  mode?: 'paper' | 'live';
-  baseEquity?: number;
+  mode: 'paper' | 'live';
+  baseEquity: number;
 }) => {
   if (equityData.length === 0) {
     return (
       <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Equity Curve</h3>
-        <div className="h-16 flex items-center justify-center text-gray-500 text-sm">
+        <div className="h-20 flex items-center justify-center text-gray-500 text-sm">
           No equity data available
         </div>
       </div>
@@ -376,16 +453,13 @@ const EquitySparkline = ({ equityData, mode = 'paper', baseEquity = 100 }: {
   const first = equityData[0] || 0;
   const trend = last - first;
 
-  const modeLabel = mode === 'paper' ? 'Paper Trading' : 'Live Trading';
-  const equityLabel = mode === 'paper' ? '$100 Virtual' : `$${baseEquity.toFixed(0)} Balance`;
-
   return (
     <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Equity Curve</h3>
         <div className="flex items-center gap-3 text-xs">
           <span className="text-gray-500 dark:text-gray-400">
-            {modeLabel} · {equityLabel}
+            {mode === 'paper' ? 'Paper Trading' : 'Live Trading'}
           </span>
           <span className={trend >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
             {trend >= 0 ? '+' : ''}{trend.toFixed(2)}
@@ -443,15 +517,13 @@ const OpenPositionsTable = ({ positions, onClosePosition }: {
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Open Positions</h3>
         <span className="text-xs text-gray-500 dark:text-gray-400">{positions.length} positions</span>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-gray-200 dark:border-gray-700">
+            <tr className="border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-800">
               <th className="text-left py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Symbol</th>
               <th className="text-left py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Side</th>
               <th className="text-right py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Entry</th>
-              <th className="text-right py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Current</th>
-              <th className="text-right py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Size</th>
               <th className="text-right py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">P&L</th>
               <th className="text-right py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Duration</th>
               <th className="text-right py-2 px-2 text-xs font-medium text-gray-500 dark:text-gray-400">Action</th>
@@ -472,12 +544,6 @@ const OpenPositionsTable = ({ positions, onClosePosition }: {
                 </td>
                 <td className="py-2 px-2 text-right font-mono text-xs text-gray-600 dark:text-gray-300">
                   ${pos.entryPrice.toLocaleString()}
-                </td>
-                <td className="py-2 px-2 text-right font-mono text-xs text-gray-600 dark:text-gray-300">
-                  ${pos.currentPrice.toLocaleString()}
-                </td>
-                <td className="py-2 px-2 text-right text-xs text-gray-600 dark:text-gray-300">
-                  {pos.size}
                 </td>
                 <td className={`py-2 px-2 text-right font-mono text-xs font-bold ${
                   pos.pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
@@ -534,8 +600,11 @@ const BotControlPanel = ({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Bot Control</h3>
+    <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4 h-full">
+      <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+        <Bot size={16} className="text-blue-600 dark:text-blue-400" />
+        Bot Control
+      </h3>
       
       <div className="space-y-3">
         <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
@@ -594,11 +663,6 @@ const BotControlPanel = ({
               Start Bot
             </button>
           )}
-          <button
-            className="px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          >
-            <Settings size={14} />
-          </button>
         </div>
       </div>
     </div>
@@ -618,14 +682,13 @@ const SignalFeed = ({ signals }: { signals: Signal[] }) => {
           {signals.filter(s => s.status === 'live').length} live
         </span>
       </div>
-      <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+      <div className="space-y-2 max-h-[250px] overflow-y-auto pr-1">
         {signals.length === 0 ? (
-          <div className="py-8 text-center text-gray-500 dark:text-gray-400 text-sm">
-            <Zap size={24} className="mx-auto mb-2 opacity-50" />
+          <div className="py-4 text-center text-gray-500 dark:text-gray-400 text-sm">
             No signals available
           </div>
         ) : (
-          signals.slice(0, 10).map((signal) => (
+          signals.slice(0, 5).map((signal) => (
             <div key={signal.id} className="p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -674,10 +737,8 @@ const SignalFeed = ({ signals }: { signals: Signal[] }) => {
   );
 };
 
-// Recent Trades Feed
-const RecentTradesFeed = ({ trades }: { trades: Trade[] }) => {
-  const openTrades = trades.filter(t => t.status === 'open').length;
-  
+// Recent Trades
+const RecentTrades = ({ trades }: { trades: Trade[] }) => {
   return (
     <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4 h-full">
       <div className="flex items-center justify-between mb-3">
@@ -685,31 +746,21 @@ const RecentTradesFeed = ({ trades }: { trades: Trade[] }) => {
           <Activity size={14} className="text-purple-600 dark:text-purple-400" />
           Recent Trades
         </h3>
-        <div className="flex items-center gap-2">
-          {openTrades > 0 && (
-            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 border border-yellow-200 dark:border-yellow-800">
-              {openTrades} open
-            </span>
-          )}
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            {trades.length} trades
-          </span>
-        </div>
+        <span className="text-xs text-gray-500 dark:text-gray-400">{trades.length} trades</span>
       </div>
-      <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+      <div className="space-y-2 max-h-[250px] overflow-y-auto pr-1">
         {trades.length === 0 ? (
-          <div className="py-8 text-center text-gray-500 dark:text-gray-400 text-sm">
-            <Activity size={24} className="mx-auto mb-2 opacity-50" />
+          <div className="py-4 text-center text-gray-500 dark:text-gray-400 text-sm">
             No recent trades
           </div>
         ) : (
-          trades.slice(0, 15).map((trade) => (
+          trades.slice(0, 10).map((trade) => (
             <div key={trade.id} className={`flex items-center justify-between p-2 rounded-lg ${
               trade.status === 'open' 
                 ? 'bg-yellow-50/50 dark:bg-yellow-950/20 border border-yellow-200 dark:border-yellow-800'
                 : 'bg-gray-50 dark:bg-gray-800/50'
             }`}>
-              <div className="flex items-center gap-3 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
                 <span className="text-xs font-medium text-gray-900 dark:text-white">{trade.symbol}</span>
                 <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
                   trade.side === 'LONG' 
@@ -734,13 +785,8 @@ const RecentTradesFeed = ({ trades }: { trades: Trade[] }) => {
                   ({trade.pnlPct >= 0 ? '+' : ''}{trade.pnlPct.toFixed(1)}%)
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400">
-                {trade.status === 'closed' ? (
-                  <span>{trade.exitReason}</span>
-                ) : (
-                  <span className="text-yellow-600 dark:text-yellow-400">● Open</span>
-                )}
-                <span className="font-mono">{trade.exitTime}</span>
+              <div className="text-[10px] text-gray-500 dark:text-gray-400">
+                {trade.exitTime}
               </div>
             </div>
           ))
@@ -750,9 +796,111 @@ const RecentTradesFeed = ({ trades }: { trades: Trade[] }) => {
   );
 };
 
+// Alerts Feed
+const AlertsFeed = ({ alerts, onMarkRead, onDelete }: { 
+  alerts: Alert[];
+  onMarkRead: (id: string) => void;
+  onDelete: (id: string) => void;
+}) => {
+  const unreadCount = alerts.filter(a => !a.read).length;
+
+  return (
+    <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4 h-full">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+          <Bell size={14} className="text-yellow-600 dark:text-yellow-400" />
+          Alerts
+          {unreadCount > 0 && (
+            <span className="px-2 py-0.5 text-xs font-bold bg-red-500 text-white rounded-full">
+              {unreadCount}
+            </span>
+          )}
+        </h3>
+      </div>
+      <div className="space-y-2 max-h-[250px] overflow-y-auto pr-1">
+        {alerts.length === 0 ? (
+          <div className="py-4 text-center text-gray-500 dark:text-gray-400 text-sm">
+            No alerts
+          </div>
+        ) : (
+          alerts.slice(0, 5).map((alert) => (
+            <div key={alert.id} className={`p-2 rounded-lg border ${
+              !alert.read ? 'bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800' : 
+              'bg-gray-50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700'
+            }`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-gray-900 dark:text-white">
+                    {alert.title}
+                  </p>
+                  <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate">
+                    {alert.message}
+                  </p>
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">
+                    {alert.time}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {!alert.read && (
+                    <button
+                      onClick={() => onMarkRead(alert.id)}
+                      className="p-0.5 text-gray-400 hover:text-gray-600 transition-colors"
+                    >
+                      <CheckCircle size={12} />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => onDelete(alert.id)}
+                    className="p-0.5 text-gray-400 hover:text-red-600 transition-colors"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Analytics Summary
+const AnalyticsSummary = ({ metrics }: { metrics: AccountMetrics }) => {
+  return (
+    <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+      <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Performance Summary</h3>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="p-2 bg-gray-50 dark:bg-gray-800/50 rounded">
+          <p className="text-[10px] text-gray-500 dark:text-gray-400">Total P&L</p>
+          <p className={`text-sm font-bold ${metrics.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            {metrics.totalPnl >= 0 ? '+' : ''}${metrics.totalPnl.toFixed(2)}
+          </p>
+        </div>
+        <div className="p-2 bg-gray-50 dark:bg-gray-800/50 rounded">
+          <p className="text-[10px] text-gray-500 dark:text-gray-400">Win Rate</p>
+          <p className="text-sm font-bold text-blue-600">{metrics.winRate.toFixed(1)}%</p>
+        </div>
+        <div className="p-2 bg-gray-50 dark:bg-gray-800/50 rounded">
+          <p className="text-[10px] text-gray-500 dark:text-gray-400">Max Drawdown</p>
+          <p className={`text-sm font-bold ${metrics.maxDrawdown > -5 ? 'text-green-600' : 'text-red-600'}`}>
+            {metrics.maxDrawdown.toFixed(1)}%
+          </p>
+        </div>
+        <div className="p-2 bg-gray-50 dark:bg-gray-800/50 rounded">
+          <p className="text-[10px] text-gray-500 dark:text-gray-400">Total Trades</p>
+          <p className="text-sm font-bold text-gray-900 dark:text-white">{metrics.totalTrades}</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ============== MAIN PAGE ==============
 export default function LiveTradingDashboardPage() {
+  const router = useRouter();
   // State
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'analytics' | 'signals' | 'alerts' | 'settings'>('dashboard');
   const [metrics, setMetrics] = useState<AccountMetrics>({
     totalBalance: 100,
     availableBalance: 100,
@@ -767,10 +915,10 @@ export default function LiveTradingDashboardPage() {
     maxDrawdown: 0,
     riskExposure: 0,
   });
-  
   const [positions, setPositions] = useState<Position[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [equityData, setEquityData] = useState<number[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus>({
     isRunning: false,
@@ -780,9 +928,9 @@ export default function LiveTradingDashboardPage() {
     lastActionTime: '',
     uptime: '0h 0m',
   });
-  
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('connecting');
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [botStartTime, setBotStartTime] = useState<number | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
@@ -790,11 +938,14 @@ export default function LiveTradingDashboardPage() {
   const [isExecuting, setIsExecuting] = useState(false);
   const [actualBalance, setActualBalance] = useState<number>(100);
   const [baseEquity, setBaseEquity] = useState<number>(100);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [alertIdCounter, setAlertIdCounter] = useState(0);
 
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const uptimeIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Get API credentials
   const getApiCredentials = () => {
@@ -805,27 +956,20 @@ export default function LiveTradingDashboardPage() {
     };
   };
 
-  // Fetch Bybit balance with proper error handling
+  // Fetch Bybit balance
   const fetchBybitBalance = async (): Promise<number> => {
     try {
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      
-      if (!apiKey || !apiSecret) {
-        return 100;
-      }
+      if (!apiKey || !apiSecret) return 100;
 
       const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
       const timestamp = Date.now().toString();
       const recvWindow = '5000';
-      
-      // For GET requests, params is empty string
       const params = '';
-      
-      // Generate signature correctly
       const signaturePayload = timestamp + apiKey + recvWindow + params;
       const crypto = require('crypto');
       const signature = crypto.createHmac('sha256', apiSecret).update(signaturePayload).digest('hex');
-      
+
       const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
         method: 'GET',
         headers: {
@@ -837,11 +981,9 @@ export default function LiveTradingDashboardPage() {
       });
 
       const data = await safeJsonParse(response);
-      
       if (data && data.retCode === 0 && data.result) {
         const wallet = data.result.list?.[0];
-        const totalEquity = parseFloat(wallet?.totalEquity || '0');
-        return totalEquity > 0 ? totalEquity : 100;
+        return parseFloat(wallet?.totalEquity || '100');
       }
       return 100;
     } catch (error) {
@@ -850,14 +992,31 @@ export default function LiveTradingDashboardPage() {
     }
   };
 
-  // Execute trade on Bybit
+  // Add alert
+  const addAlert = (type: Alert['type'], priority: Alert['priority'], title: string, message: string, symbol?: string, price?: number) => {
+    const newAlert: Alert = {
+      id: `alert-${Date.now()}-${alertIdCounter}`,
+      type,
+      priority,
+      title,
+      message,
+      time: 'Just now',
+      read: false,
+      timestamp: Date.now(),
+      symbol,
+      price,
+    };
+    setAlertIdCounter(prev => prev + 1);
+    setAlerts(prev => [newAlert, ...prev].slice(0, 50));
+  };
+
+  // Execute trade
   const executeTrade = async (symbol: string, side: 'LONG' | 'SHORT', size: number, leverage: number) => {
     try {
       setIsExecuting(true);
       setError(null);
       
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      
       if (!apiKey || !apiSecret) {
         setError('API credentials not configured');
         setIsExecuting(false);
@@ -867,14 +1026,14 @@ export default function LiveTradingDashboardPage() {
       const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
       const timestamp = Date.now().toString();
       const recvWindow = '5000';
-      
-      // Step 1: Set leverage
+      const crypto = require('crypto');
+
+      // Set leverage
       const leverageParams = `category=linear&symbol=${symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`;
       const leverageSignaturePayload = timestamp + apiKey + recvWindow + leverageParams;
-      const crypto = require('crypto');
       const leverageSignature = crypto.createHmac('sha256', apiSecret).update(leverageSignaturePayload).digest('hex');
       
-      const leverageResponse = await fetch(`${baseUrl}/v5/position/set-leverage`, {
+      await fetch(`${baseUrl}/v5/position/set-leverage`, {
         method: 'POST',
         headers: {
           'X-BAPI-API-KEY': apiKey,
@@ -885,20 +1044,13 @@ export default function LiveTradingDashboardPage() {
         },
         body: JSON.stringify({
           category: 'linear',
-          symbol: symbol,
+          symbol,
           buyLeverage: leverage.toString(),
           sellLeverage: leverage.toString(),
         }),
       });
 
-      const leverageData = await safeJsonParse(leverageResponse);
-      if (leverageData && leverageData.retCode !== 0) {
-        setError(`Failed to set leverage: ${leverageData.retMsg || 'Unknown error'}`);
-        setIsExecuting(false);
-        return;
-      }
-
-      // Step 2: Place the order
+      // Place order
       const orderSide = side === 'LONG' ? 'Buy' : 'Sell';
       const orderParams = `category=linear&symbol=${symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC`;
       const orderSignaturePayload = timestamp + apiKey + recvWindow + orderParams;
@@ -915,7 +1067,7 @@ export default function LiveTradingDashboardPage() {
         },
         body: JSON.stringify({
           category: 'linear',
-          symbol: symbol,
+          symbol,
           side: orderSide,
           orderType: 'Market',
           qty: size.toString(),
@@ -924,13 +1076,12 @@ export default function LiveTradingDashboardPage() {
       });
 
       const orderData = await safeJsonParse(orderResponse);
-      
       if (orderData && orderData.retCode === 0) {
-        setError(`✅ Position opened: ${side} ${symbol}`);
-        setTimeout(() => setError(null), 3000);
+        addAlert('trade', 'high', `✅ ${side} ${symbol}`, `Position opened at market price with ${leverage}x leverage`, symbol);
         await fetchAllData();
       } else {
         setError(`❌ Order failed: ${orderData?.retMsg || 'Unknown error'}`);
+        addAlert('system', 'medium', '❌ Trade Failed', `Failed to open ${side} ${symbol}: ${orderData?.retMsg || 'Unknown error'}`, symbol);
       }
     } catch (err) {
       console.error('Error executing trade:', err);
@@ -940,11 +1091,10 @@ export default function LiveTradingDashboardPage() {
     }
   };
 
-  // Close position on Bybit
+  // Close position
   const closePositionOnBybit = async (position: Position) => {
     try {
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      
       if (!apiKey || !apiSecret) {
         setError('API credentials not configured');
         return;
@@ -953,11 +1103,11 @@ export default function LiveTradingDashboardPage() {
       const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
       const timestamp = Date.now().toString();
       const recvWindow = '5000';
+      const crypto = require('crypto');
       
       const side = position.side === 'LONG' ? 'Sell' : 'Buy';
       const params = `category=linear&symbol=${position.symbol}&side=${side}&orderType=Market&qty=${position.size}&timeInForce=GTC&positionIdx=${position.positionIdx || 0}`;
       const signaturePayload = timestamp + apiKey + recvWindow + params;
-      const crypto = require('crypto');
       const signature = crypto.createHmac('sha256', apiSecret).update(signaturePayload).digest('hex');
       
       const response = await fetch(`${baseUrl}/v5/order/create`, {
@@ -972,7 +1122,7 @@ export default function LiveTradingDashboardPage() {
         body: JSON.stringify({
           category: 'linear',
           symbol: position.symbol,
-          side: side,
+          side,
           orderType: 'Market',
           qty: position.size.toString(),
           timeInForce: 'GTC',
@@ -981,11 +1131,9 @@ export default function LiveTradingDashboardPage() {
       });
 
       const data = await safeJsonParse(response);
-      
       if (data && data.retCode === 0) {
         await fetchAllData();
-        setError(`✅ Position closed: ${position.symbol}`);
-        setTimeout(() => setError(null), 3000);
+        addAlert('trade', 'medium', `✅ Position Closed`, `Closed ${position.side} ${position.symbol}`, position.symbol);
       } else {
         setError(`❌ Close failed: ${data?.retMsg || 'Unknown error'}`);
       }
@@ -995,13 +1143,13 @@ export default function LiveTradingDashboardPage() {
     }
   };
 
-  // Fetch real data from Bybit
+  // Fetch all data
   const fetchAllData = async () => {
     try {
+      setIsRefreshing(true);
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
       const hasApiKeys = apiKey && apiSecret;
       
-      // Fetch balance first
       let balance = 100;
       if (hasApiKeys) {
         balance = await fetchBybitBalance();
@@ -1010,39 +1158,36 @@ export default function LiveTradingDashboardPage() {
       } else {
         setIsApiConnected(false);
       }
-      
-      // Use balance as base equity
+
       const currentBaseEquity = botStatus.mode === 'live' ? balance : 100;
       setBaseEquity(currentBaseEquity);
-      
-      // Fetch ticker data for all symbols
+
+      // Fetch ticker data
       const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
         fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
           .then(r => r.json())
           .catch(() => null)
       );
-      
       const tickerResults = await Promise.all(tickerPromises);
-      
+
       let totalEquity = currentBaseEquity;
       let dailyPnl = 0;
       let openPositionsCount = 0;
-      let totalVolume = 0;
       let avgChange = 0;
       let validCount = 0;
       const newPositions: Position[] = [];
       const newSignals: Signal[] = [];
       const newTrades: Trade[] = [];
-      
-      // If API connected, fetch real positions
+
+      // Fetch real positions if API connected
       if (hasApiKeys) {
         try {
           const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
           const timestamp = Date.now().toString();
           const recvWindow = '5000';
           const params = '';
-          const signaturePayload = timestamp + apiKey + recvWindow + params;
           const crypto = require('crypto');
+          const signaturePayload = timestamp + apiKey + recvWindow + params;
           const signature = crypto.createHmac('sha256', apiSecret).update(signaturePayload).digest('hex');
           
           const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
@@ -1074,12 +1219,12 @@ export default function LiveTradingDashboardPage() {
                 newPositions.push({
                   id: `pos-${pos.symbol}-${pos.positionIdx}`,
                   symbol: pos.symbol,
-                  side: side,
-                  entryPrice: entryPrice,
+                  side,
+                  entryPrice,
                   currentPrice: markPrice,
                   size: Math.abs(size),
-                  pnl: pnl,
-                  pnlPct: pnlPct,
+                  pnl,
+                  pnlPct,
                   entryTime: new Date(parseInt(pos.createdTime)).toLocaleTimeString(),
                   duration: `${Math.floor((Date.now() - parseInt(pos.createdTime)) / 60000)}m`,
                   leverage: parseFloat(pos.leverage || 5),
@@ -1094,11 +1239,10 @@ export default function LiveTradingDashboardPage() {
           }
         } catch (err) {
           console.error('Error fetching positions:', err);
-          // Continue with paper mode data
         }
       }
-      
-      // Process ticker data for signals and market data
+
+      // Process ticker data
       tickerResults.forEach((result: any) => {
         if (result && result.retCode === 0 && result.result?.list?.length > 0) {
           const ticker = result.result.list[0];
@@ -1107,14 +1251,13 @@ export default function LiveTradingDashboardPage() {
           const change24h = parseFloat(ticker.price24hPcnt) * 100;
           const volume = parseFloat(ticker.volume24h);
           
-          totalVolume += volume;
           avgChange += change24h;
           validCount++;
-          
-          // Simulate positions for paper mode
+
+          // Paper mode simulation
           if (botStatus.mode === 'paper' && !hasApiKeys) {
             const volatility = Math.abs(change24h);
-            const hasPosition = volatility > 1.5 && Math.random() < 0.2;
+            const hasPosition = volatility > 1.5 && Math.random() < 0.15;
             
             if (hasPosition) {
               openPositionsCount++;
@@ -1130,8 +1273,8 @@ export default function LiveTradingDashboardPage() {
                 entryPrice,
                 currentPrice: price,
                 size: 0.001 + Math.random() * 0.003,
-                pnl: pnl,
-                pnlPct: pnlPct,
+                pnl,
+                pnlPct,
                 entryTime: new Date(Date.now() - Math.random() * 7200000).toLocaleTimeString(),
                 duration: `${Math.floor(Math.random() * 60 + 5)}m`,
                 leverage: 5,
@@ -1144,8 +1287,8 @@ export default function LiveTradingDashboardPage() {
               dailyPnl += pnl;
             }
           }
-          
-          // Generate signal if significant movement
+
+          // Generate signal
           if (Math.abs(change24h) > 1.5) {
             const confidence = 70 + Math.abs(change24h) * 2 + Math.min(volume / 1e8, 15);
             const isLong = change24h > 0;
@@ -1155,6 +1298,7 @@ export default function LiveTradingDashboardPage() {
             const tp1 = isLong ? price + atr * 2.5 : price - atr * 2.5;
             const rr = (Math.abs(tp1 - price) / Math.abs(sl - price));
             
+            const status = confidence > 80 ? 'live' : confidence > 70 ? 'pending' : 'rejected';
             newSignals.push({
               id: `sig-${symbol}-${Date.now()}`,
               symbol,
@@ -1166,16 +1310,30 @@ export default function LiveTradingDashboardPage() {
               tp2: isLong ? price + atr * 4 : price - atr * 4,
               rr: Math.round(rr * 10) / 10,
               timeframe: Math.abs(change24h) > 2 ? '15m' : '5m',
-              status: confidence > 80 ? 'live' : 'pending',
+              status: status as 'pending' | 'live' | 'rejected' | 'executed',
               generatedAt: new Date().toLocaleTimeString(),
-              change24h: change24h,
-              volume: volume,
+              change24h,
+              volume,
+              regime: Math.abs(change24h) > 3 ? 'trending' : 'ranging',
+              signalSource: confidence > 80 ? 'hybrid' : 'technical',
             });
+
+            // High confidence signal alert
+            if (confidence > 80) {
+              addAlert(
+                'signal', 
+                'high', 
+                `🔥 ${isLong ? 'LONG' : 'SHORT'} ${symbol}`, 
+                `Confidence: ${Math.round(confidence)}% | Entry: $${entryPrice.toFixed(2)} | R:R 1:${rr.toFixed(1)}`,
+                symbol,
+                entryPrice
+              );
+            }
           }
-          
-          // Generate paper trade history
-          if (botStatus.mode === 'paper' && !hasApiKeys && Math.random() < 0.15) {
-            const pnl = (Math.random() - 0.3) * 2;
+
+          // Generate paper trade
+          if (botStatus.mode === 'paper' && !hasApiKeys && Math.random() < 0.1) {
+            const pnl = (Math.random() - 0.4) * 1.5;
             newTrades.push({
               id: `trade-${symbol}-${Date.now()}`,
               symbol,
@@ -1189,11 +1347,13 @@ export default function LiveTradingDashboardPage() {
               exitTime: new Date().toLocaleTimeString(),
               exitReason: pnl > 0 ? 'TP_HIT' : 'SL_HIT',
               status: 'closed',
+              leverage: 5,
+              confidence: 60 + Math.random() * 30,
             });
           }
         }
       });
-      
+
       // Update metrics
       setMetrics({
         totalBalance: currentBaseEquity,
@@ -1205,16 +1365,14 @@ export default function LiveTradingDashboardPage() {
         dailyPnlPct: Math.round((dailyPnl / currentBaseEquity) * 100 * 100) / 100,
         openPositions: openPositionsCount,
         totalTrades: newTrades.length + 5,
-        winRate: 60 + Math.random() * 15,
+        winRate: 55 + Math.random() * 20,
         riskExposure: Math.min(20, openPositionsCount * 3 + Math.random() * 2),
         maxDrawdown: -Math.min(15, Math.abs(avgChange / validCount) * 2 + 2),
       });
-      
+
       setPositions(newPositions);
       setSignals(prev => [...newSignals, ...prev].slice(0, 50));
       setTrades(prev => [...newTrades, ...prev].slice(0, 50));
-      
-      // Update equity data
       setEquityData(prev => {
         const newData = [...prev, totalEquity];
         return newData.slice(-90);
@@ -1227,11 +1385,12 @@ export default function LiveTradingDashboardPage() {
       setError('Failed to load data. Using fallback.');
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   };
 
-  // WebSocket connection for real-time updates
-  const connectWebSocket = () => {
+  // WebSocket connection
+  const connectWebSocket = useCallback(() => {
     try {
       setConnectionStatus('connecting');
       
@@ -1241,11 +1400,20 @@ export default function LiveTradingDashboardPage() {
       ws.onopen = () => {
         setConnectionStatus('connected');
         setError(null);
+        setReconnectAttempts(0);
         
         ws.send(JSON.stringify({
           op: 'subscribe',
           args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
         }));
+        
+        // Start heartbeat
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ op: 'ping' }));
+          }
+        }, 30000);
       };
 
       ws.onmessage = (event) => {
@@ -1253,8 +1421,6 @@ export default function LiveTradingDashboardPage() {
           const data = JSON.parse(event.data);
           if (data.topic === 'tickers') {
             fetchAllData();
-          } else if (data.op === 'pong') {
-            // Ignore
           }
         } catch (err) {
           // Ignore parse errors
@@ -1263,23 +1429,29 @@ export default function LiveTradingDashboardPage() {
 
       ws.onerror = () => {
         setConnectionStatus('error');
-        setError('WebSocket connection error');
       };
 
       ws.onclose = () => {
         setConnectionStatus('disconnected');
+        if (heartbeatIntervalRef.current) {
+          clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
+        }
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
+        const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          setReconnectAttempts(prev => prev + 1);
+          connectWebSocket();
+        }, delay);
       };
     } catch (err) {
       setConnectionStatus('error');
-      setError('Failed to establish WebSocket connection');
     }
-  };
+  }, [reconnectAttempts]);
 
-  const disconnectWebSocket = () => {
+  const disconnectWebSocket = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -1288,7 +1460,73 @@ export default function LiveTradingDashboardPage() {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-  };
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+  }, []);
+
+  // Bot controls
+  const handleStartBot = useCallback(() => {
+    setBotStatus(prev => ({
+      ...prev,
+      isRunning: true,
+      status: 'trading',
+      lastAction: 'Bot started',
+      lastActionTime: new Date().toLocaleTimeString(),
+    }));
+    setBotStartTime(Date.now());
+    addAlert('system', 'medium', '🤖 Bot Started', 'Trading bot has been activated', undefined, undefined);
+    
+    if (uptimeIntervalRef.current) clearInterval(uptimeIntervalRef.current);
+    uptimeIntervalRef.current = setInterval(() => {
+      if (botStartTime) {
+        const diff = Math.floor((Date.now() - botStartTime) / 1000);
+        const hours = Math.floor(diff / 3600);
+        const minutes = Math.floor((diff % 3600) / 60);
+        setBotStatus(prev => ({ ...prev, uptime: `${hours}h ${minutes}m` }));
+      }
+    }, 60000);
+  }, [botStartTime]);
+
+  const handleStopBot = useCallback(() => {
+    setBotStatus(prev => ({
+      ...prev,
+      isRunning: false,
+      status: 'idle',
+      lastAction: 'Bot stopped',
+      lastActionTime: new Date().toLocaleTimeString(),
+      uptime: '0h 0m',
+    }));
+    setBotStartTime(null);
+    if (uptimeIntervalRef.current) {
+      clearInterval(uptimeIntervalRef.current);
+      uptimeIntervalRef.current = null;
+    }
+    addAlert('system', 'medium', '🛑 Bot Stopped', 'Trading bot has been deactivated', undefined, undefined);
+  }, []);
+
+  const handleToggleMode = useCallback(() => {
+    const newMode = botStatus.mode === 'paper' ? 'live' : 'paper';
+    if (newMode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE mode will use real funds. Are you sure?')) {
+      return;
+    }
+    setBotStatus(prev => ({
+      ...prev,
+      mode: newMode,
+      lastAction: `Switched to ${newMode} mode`,
+      lastActionTime: new Date().toLocaleTimeString(),
+    }));
+    fetchAllData();
+    addAlert('system', 'low', `📄 Mode Changed`, `Switched to ${newMode.toUpperCase()} mode`, undefined, undefined);
+  }, [botStatus.mode]);
+
+  const handleReconnect = useCallback(() => {
+    disconnectWebSocket();
+    setReconnectAttempts(0);
+    setTimeout(connectWebSocket, 1000);
+    fetchAllData();
+  }, [disconnectWebSocket, connectWebSocket]);
 
   // Initialize
   useEffect(() => {
@@ -1304,74 +1542,10 @@ export default function LiveTradingDashboardPage() {
     return () => {
       clearInterval(interval);
       disconnectWebSocket();
-      if (uptimeIntervalRef.current) {
-        clearInterval(uptimeIntervalRef.current);
-      }
+      if (uptimeIntervalRef.current) clearInterval(uptimeIntervalRef.current);
+      if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
     };
-  }, [botStatus.mode]);
-
-  // Bot controls
-  const handleStartBot = () => {
-    setBotStatus(prev => ({
-      ...prev,
-      isRunning: true,
-      status: 'trading',
-      lastAction: 'Bot started',
-      lastActionTime: new Date().toLocaleTimeString(),
-    }));
-    setBotStartTime(Date.now());
-    
-    if (uptimeIntervalRef.current) {
-      clearInterval(uptimeIntervalRef.current);
-    }
-    uptimeIntervalRef.current = setInterval(() => {
-      if (botStartTime) {
-        const diff = Math.floor((Date.now() - botStartTime) / 1000);
-        const hours = Math.floor(diff / 3600);
-        const minutes = Math.floor((diff % 3600) / 60);
-        setBotStatus(prev => ({
-          ...prev,
-          uptime: `${hours}h ${minutes}m`,
-        }));
-      }
-    }, 60000);
-  };
-
-  const handleStopBot = () => {
-    setBotStatus(prev => ({
-      ...prev,
-      isRunning: false,
-      status: 'idle',
-      lastAction: 'Bot stopped',
-      lastActionTime: new Date().toLocaleTimeString(),
-      uptime: '0h 0m',
-    }));
-    setBotStartTime(null);
-    if (uptimeIntervalRef.current) {
-      clearInterval(uptimeIntervalRef.current);
-      uptimeIntervalRef.current = null;
-    }
-  };
-
-  const handleToggleMode = () => {
-    const newMode = botStatus.mode === 'paper' ? 'live' : 'paper';
-    if (newMode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE mode will use real funds. Are you sure?')) {
-      return;
-    }
-    setBotStatus(prev => ({
-      ...prev,
-      mode: newMode,
-      lastAction: `Switched to ${newMode} mode`,
-      lastActionTime: new Date().toLocaleTimeString(),
-    }));
-    fetchAllData();
-  };
-
-  const handleReconnect = () => {
-    disconnectWebSocket();
-    setTimeout(connectWebSocket, 1000);
-    fetchAllData();
-  };
+  }, []);
 
   // Loading state
   if (isLoading && equityData.length === 0) {
@@ -1400,19 +1574,18 @@ export default function LiveTradingDashboardPage() {
   return (
     <AppLayout>
       <div className="p-4 md:p-6 space-y-5 max-w-7xl mx-auto">
-        {/* Header */}
+        {/* Page Navigation - Redirect buttons to all pages */}
+        <PageNavigation />
+
+        {/* Header with Tabs */}
         <DashboardHeader 
-          botStatus={botStatus} 
+          botStatus={botStatus}
           onRefresh={fetchAllData}
           connectionStatus={connectionStatus}
           isApiConnected={isApiConnected}
-        />
-
-        {/* Quick Trade Form */}
-        <QuickTradeForm 
-          onExecute={executeTrade}
-          isExecuting={isExecuting}
-          isApiConnected={isApiConnected}
+          isRefreshing={isRefreshing}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
         />
 
         {/* Error Message */}
@@ -1426,17 +1599,14 @@ export default function LiveTradingDashboardPage() {
           }`}>
             <AlertCircle size={16} />
             <span>{error}</span>
-            <button
-              onClick={() => setError(null)}
-              className="ml-auto hover:opacity-70"
-            >
+            <button onClick={() => setError(null)} className="ml-auto hover:opacity-70">
               <X size={14} />
             </button>
           </div>
         )}
 
-        {/* Connection Status */}
-        <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-2">
+        {/* Connection Status Bar */}
+        <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mb-2 flex-wrap">
           <div className="flex items-center gap-1">
             {connectionStatus === 'connected' ? (
               <Wifi size={12} className="text-green-500" />
@@ -1452,10 +1622,7 @@ export default function LiveTradingDashboardPage() {
             </span>
           </div>
           {connectionStatus === 'error' && (
-            <button
-              onClick={handleReconnect}
-              className="text-blue-600 dark:text-blue-400 hover:underline"
-            >
+            <button onClick={handleReconnect} className="text-blue-600 dark:text-blue-400 hover:underline">
               Reconnect
             </button>
           )}
@@ -1467,45 +1634,412 @@ export default function LiveTradingDashboardPage() {
               ? `Live Balance: $${actualBalance.toFixed(2)}` 
               : `${SUPPORTED_SYMBOLS.length} symbols monitored`}
           </span>
+          <span className="text-gray-300 dark:text-gray-600">|</span>
+          <span className="flex items-center gap-1">
+            <Bell size={10} className="text-yellow-500" />
+            {alerts.filter(a => !a.read).length} unread
+          </span>
         </div>
 
-        {/* KPI Cards */}
-        <LiveMetricCards metrics={metrics} mode={botStatus.mode} />
-
-        {/* Equity Curve */}
-        <EquitySparkline 
-          equityData={equityData} 
-          mode={botStatus.mode}
-          baseEquity={baseEquity}
-        />
-
-        {/* Middle Row */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          <div className="lg:col-span-2">
-            <OpenPositionsTable 
-              positions={positions} 
-              onClosePosition={closePositionOnBybit}
+        {/* ==================== DASHBOARD TAB ==================== */}
+        {activeTab === 'dashboard' && (
+          <>
+            {/* Quick Trade */}
+            <QuickTradeForm 
+              onExecute={executeTrade}
+              isExecuting={isExecuting}
+              isApiConnected={isApiConnected}
             />
-          </div>
-          <div>
-            <BotControlPanel 
-              botStatus={botStatus}
-              onStart={handleStartBot}
-              onStop={handleStopBot}
-              onToggleMode={handleToggleMode}
-            />
-          </div>
-        </div>
 
-        {/* Bottom Row */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
-          <div className="lg:col-span-2">
-            <SignalFeed signals={signals} />
+            {/* KPI Cards */}
+            <LiveMetricCards metrics={metrics} />
+
+            {/* Equity Curve */}
+            <EquityCurve equityData={equityData} mode={botStatus.mode} baseEquity={baseEquity} />
+
+            {/* Middle Row: Positions + Bot Control */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+              <div className="lg:col-span-2">
+                <OpenPositionsTable positions={positions} onClosePosition={closePositionOnBybit} />
+              </div>
+              <div>
+                <BotControlPanel 
+                  botStatus={botStatus}
+                  onStart={handleStartBot}
+                  onStop={handleStopBot}
+                  onToggleMode={handleToggleMode}
+                />
+              </div>
+            </div>
+
+            {/* Bottom Row: Signals + Trades + Alerts */}
+            <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+              <div className="lg:col-span-2">
+                <SignalFeed signals={signals} />
+              </div>
+              <div className="lg:col-span-2">
+                <RecentTrades trades={trades} />
+              </div>
+              <div className="lg:col-span-1">
+                <AlertsFeed 
+                  alerts={alerts} 
+                  onMarkRead={(id) => setAlerts(prev => prev.map(a => a.id === id ? { ...a, read: true } : a))}
+                  onDelete={(id) => setAlerts(prev => prev.filter(a => a.id !== id))}
+                />
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ==================== ANALYTICS TAB ==================== */}
+        {activeTab === 'analytics' && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <div className="lg:col-span-2 space-y-5">
+              {/* Equity Curve (full) */}
+              <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Equity Curve (90 Days)</h3>
+                <div className="h-48 relative">
+                  <div className="absolute inset-0 flex items-end">
+                    {equityData.map((value, i) => {
+                      const max = Math.max(...equityData);
+                      const min = Math.min(...equityData);
+                      const range = max - min || 1;
+                      const height = ((value - min) / range) * 100;
+                      const trend = equityData[equityData.length - 1] - equityData[0];
+                      return (
+                        <div
+                          key={i}
+                          className="flex-1 mx-0.5 transition-all duration-300"
+                          style={{ height: `${Math.max(height, 2)}%` }}
+                        >
+                          <div className={`w-full rounded-t ${trend >= 0 ? 'bg-green-500' : 'bg-red-500'}`} style={{ height: '100%' }} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Analytics Summary Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                {[
+                  { label: 'Total P&L', value: `$${metrics.totalPnl.toFixed(2)}`, color: metrics.totalPnl >= 0 ? 'text-green-600' : 'text-red-600' },
+                  { label: 'Win Rate', value: `${metrics.winRate.toFixed(1)}%`, color: 'text-blue-600' },
+                  { label: 'Max Drawdown', value: `${metrics.maxDrawdown.toFixed(1)}%`, color: metrics.maxDrawdown > -5 ? 'text-green-600' : 'text-red-600' },
+                  { label: 'Total Trades', value: metrics.totalTrades.toString(), color: 'text-gray-900 dark:text-white' },
+                  { label: 'Open Positions', value: metrics.openPositions.toString(), color: 'text-yellow-600' },
+                  { label: 'Risk Exposure', value: `${metrics.riskExposure.toFixed(1)}%`, color: metrics.riskExposure > 15 ? 'text-red-600' : 'text-green-600' },
+                ].map((stat) => (
+                  <div key={stat.label} className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">{stat.label}</p>
+                    <p className={`text-lg font-bold font-mono ${stat.color}`}>{stat.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-5">
+              <AnalyticsSummary metrics={metrics} />
+              <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Risk Assessment</h3>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-gray-500 dark:text-gray-400">Current Risk</span>
+                    <span className={`font-bold ${metrics.riskExposure > 15 ? 'text-red-600' : 'text-green-600'}`}>
+                      {metrics.riskExposure > 15 ? 'High' : 'Moderate'}
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                    <div className={`h-2 rounded-full ${metrics.riskExposure > 15 ? 'bg-red-500' : 'bg-green-500'}`} 
+                         style={{ width: `${Math.min(metrics.riskExposure * 3, 100)}%` }} />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-gray-400 dark:text-gray-500">
+                    <span>0%</span>
+                    <span>20%</span>
+                    <span>40%+</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-          <div className="lg:col-span-3">
-            <RecentTradesFeed trades={trades} />
+        )}
+
+        {/* ==================== SIGNALS TAB ==================== */}
+        {activeTab === 'signals' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Signal Feed</h2>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                {signals.filter(s => s.status === 'live').length} live · {signals.filter(s => s.status === 'pending').length} pending
+              </span>
+            </div>
+            <div className="space-y-2 max-h-[600px] overflow-y-auto">
+              {signals.length === 0 ? (
+                <div className="py-12 text-center text-gray-500 dark:text-gray-400 text-sm bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
+                  <Zap size={32} className="mx-auto mb-2 opacity-50" />
+                  No signals available
+                </div>
+              ) : (
+                signals.map((signal) => (
+                  <div key={signal.id} className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`p-1.5 rounded-lg ${
+                          signal.direction === 'LONG' 
+                            ? 'bg-green-100 dark:bg-green-900/30' 
+                            : 'bg-red-100 dark:bg-red-900/30'
+                        }`}>
+                          {signal.direction === 'LONG' ? (
+                            <TrendingUp size={14} className="text-green-600 dark:text-green-400" />
+                          ) : (
+                            <TrendingDown size={14} className="text-red-600 dark:text-red-400" />
+                          )}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-bold text-gray-900 dark:text-white">{signal.symbol}</span>
+                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                              signal.direction === 'LONG' 
+                                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
+                                : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
+                            }`}>
+                              {signal.direction}
+                            </span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                              signal.status === 'live' 
+                                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                                : signal.status === 'pending'
+                                ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
+                                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+                            }`}>
+                              {signal.status}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400">
+                            <span>Entry: ${signal.entryPrice.toLocaleString()}</span>
+                            <span>SL: ${signal.sl.toLocaleString()}</span>
+                            <span>TP1: ${signal.tp1.toLocaleString()}</span>
+                            <span>R:R 1:{signal.rr}</span>
+                            <span>{signal.generatedAt}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs font-bold ${
+                          signal.confidence >= 85 ? 'text-green-600 dark:text-green-400' :
+                          signal.confidence >= 75 ? 'text-yellow-600 dark:text-yellow-400' :
+                          'text-gray-500 dark:text-gray-400'
+                        }`}>
+                          {signal.confidence}%
+                        </span>
+                        <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+                          {signal.regime}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* ==================== ALERTS TAB ==================== */}
+        {activeTab === 'alerts' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Alert History</h2>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setAlerts(prev => prev.map(a => ({ ...a, read: true })))}
+                  className="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                >
+                  Mark all read
+                </button>
+                <button
+                  onClick={() => setAlerts(prev => prev.filter(a => !a.read))}
+                  className="px-3 py-1.5 text-xs font-medium text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors"
+                >
+                  Clear read
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2 max-h-[600px] overflow-y-auto">
+              {alerts.length === 0 ? (
+                <div className="py-12 text-center text-gray-500 dark:text-gray-400 text-sm bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
+                  <Bell size={32} className="mx-auto mb-2 opacity-50" />
+                  No alerts
+                </div>
+              ) : (
+                alerts.map((alert) => {
+                  const colors = {
+                    signal: 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20',
+                    trade: 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20',
+                    risk: 'border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-950/20',
+                    system: 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50',
+                  };
+                  const textColors = {
+                    signal: 'text-blue-700 dark:text-blue-400',
+                    trade: 'text-green-700 dark:text-green-400',
+                    risk: 'text-yellow-700 dark:text-yellow-400',
+                    system: 'text-gray-700 dark:text-gray-400',
+                  };
+                  return (
+                    <div key={alert.id} className={`border rounded-lg p-4 ${colors[alert.type]} ${!alert.read ? 'ring-1 ring-blue-500/20' : ''}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <p className={`text-sm font-semibold ${textColors[alert.type]}`}>
+                            {alert.title}
+                            {alert.symbol && (
+                              <span className="ml-2 text-[10px] text-gray-500 dark:text-gray-400 font-mono">
+                                ${alert.price?.toFixed(2)}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-gray-600 dark:text-gray-300 mt-0.5">{alert.message}</p>
+                          <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-1">{alert.time}</p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {!alert.read && (
+                            <button
+                              onClick={() => setAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, read: true } : a))}
+                              className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-500 hover:text-gray-900 transition-colors"
+                            >
+                              <CheckCircle size={12} />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setAlerts(prev => prev.filter(a => a.id !== alert.id))}
+                            className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-500 hover:text-red-600 transition-colors"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ==================== SETTINGS TAB ==================== */}
+        {activeTab === 'settings' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-5 space-y-4">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                <Shield size={16} className="text-blue-600 dark:text-blue-400" />
+                API Configuration
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">API Status</label>
+                  <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${
+                    isApiConnected 
+                      ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800'
+                      : 'bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 border border-yellow-200 dark:border-yellow-800'
+                  }`}>
+                    {isApiConnected ? (
+                      <CheckCircle size={14} />
+                    ) : (
+                      <AlertCircle size={14} />
+                    )}
+                    {isApiConnected ? 'Connected to Bybit API' : 'Using Paper Trading Mode'}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Trading Mode</span>
+                  <button
+                    onClick={handleToggleMode}
+                    className={`text-xs font-medium px-3 py-1 rounded ${
+                      botStatus.mode === 'live'
+                        ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
+                        : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                    }`}
+                  >
+                    {botStatus.mode.toUpperCase()}
+                  </button>
+                </div>
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Bot Status</span>
+                  <span className={`text-xs font-medium flex items-center gap-1 ${
+                    botStatus.isRunning ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'
+                  }`}>
+                    <div className={`w-1.5 h-1.5 rounded-full ${botStatus.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+                    {botStatus.isRunning ? 'Running' : 'Stopped'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Symbols Monitored</span>
+                  <span className="text-xs font-medium text-gray-900 dark:text-white">{SUPPORTED_SYMBOLS.length}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-5 space-y-4">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                <Database size={16} className="text-purple-600 dark:text-purple-400" />
+                Connection Status
+              </h3>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">WebSocket</span>
+                  <span className={`text-xs font-medium flex items-center gap-1 ${
+                    connectionStatus === 'connected' ? 'text-green-600 dark:text-green-400' :
+                    connectionStatus === 'error' ? 'text-red-600 dark:text-red-400' :
+                    'text-yellow-600 dark:text-yellow-400'
+                  }`}>
+                    {connectionStatus === 'connected' && <Wifi size={12} />}
+                    {connectionStatus === 'error' && <WifiOff size={12} />}
+                    {connectionStatus === 'connecting' && <Loader2 size={12} className="animate-spin" />}
+                    {connectionStatus}
+                  </span>
+                </div>
+                {connectionStatus === 'error' && (
+                  <button
+                    onClick={handleReconnect}
+                    className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    <RefreshCw size={14} />
+                    Reconnect
+                  </button>
+                )}
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Last Update</span>
+                  <span className="text-xs font-mono text-gray-900 dark:text-white">{lastUpdate.toLocaleTimeString()}</span>
+                </div>
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Reconnect Attempts</span>
+                  <span className="text-xs font-medium text-gray-900 dark:text-white">{reconnectAttempts}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="lg:col-span-2 bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-5">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Quick Actions</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={fetchAllData}
+                  className="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                >
+                  <RefreshCw size={14} />
+                  Refresh Data
+                </button>
+                <button
+                  onClick={() => {
+                    setAlerts([]);
+                    addAlert('system', 'low', '🧹 Alerts Cleared', 'All alerts have been cleared', undefined, undefined);
+                  }}
+                  className="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 rounded-lg hover:bg-red-100 dark:hover:bg-red-950/30 transition-colors"
+                >
+                  <X size={14} />
+                  Clear All Alerts
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </AppLayout>
   );
