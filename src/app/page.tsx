@@ -1,4 +1,4 @@
-// app/live-trading/page.tsx - Unified Dashboard with Real Data Integration
+// app/page.tsx - Main Dashboard (Homepage)
 
 'use client';
 
@@ -146,7 +146,7 @@ const PageNavigation = () => {
   const router = useRouter();
   
   const pages = [
-    { path: '/live-trading', label: 'Dashboard', icon: <LayoutDashboard size={14} /> },
+    { path: '/', label: 'Dashboard', icon: <LayoutDashboard size={14} /> },
     { path: '/performance-analytics', label: 'Analytics', icon: <BarChart3 size={14} /> },
     { path: '/trade-logs', label: 'Trade Logs', icon: <FileText size={14} /> },
     { path: '/signal-engine', label: 'Signal Engine', icon: <Zap size={14} /> },
@@ -897,7 +897,7 @@ const AnalyticsSummary = ({ metrics }: { metrics: AccountMetrics }) => {
 };
 
 // ============== MAIN PAGE ==============
-export default function LiveTradingDashboardPage() {
+export default function Home() {
   const router = useRouter();
   
   // State
