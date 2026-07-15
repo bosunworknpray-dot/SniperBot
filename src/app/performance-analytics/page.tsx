@@ -73,6 +73,20 @@ const generateSignature = (apiSecret: string, timestamp: string, recvWindow: str
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
+// Helper to safely parse JSON response
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') {
+      return null;
+    }
+    return JSON.parse(text);
+  } catch (error) {
+    console.error('Failed to parse JSON:', error);
+    return null;
+  }
+};
+
 // ============== COMPONENTS ==============
 
 // Analytics Header
@@ -635,7 +649,7 @@ export default function PerformanceAnalyticsPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Fetch Bybit balance
+  // Fetch Bybit balance with safe parsing
   const fetchBybitBalance = async (): Promise<number> => {
     try {
       const apiKey = process.env.NEXT_PUBLIC_BYBIT_API_KEY;
@@ -663,11 +677,12 @@ export default function PerformanceAnalyticsPage() {
         },
       });
 
-      const data = await response.json();
+      const data = await safeJsonParse(response);
       
-      if (data.retCode === 0 && data.result) {
+      if (data && data.retCode === 0 && data.result) {
         const wallet = data.result.list?.[0];
-        return parseFloat(wallet?.totalEquity || '100');
+        const totalEquity = parseFloat(wallet?.totalEquity || '100');
+        return totalEquity > 0 ? totalEquity : 100;
       }
       return 100;
     } catch (error) {
@@ -686,18 +701,18 @@ export default function PerformanceAnalyticsPage() {
       const balance = await fetchBybitBalance();
       setBaseEquity(balance);
       
-      // Fetch ticker data for all symbols
+      // Fetch ticker data for all symbols with safe parsing
       const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
         fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => r.json())
+          .then(r => safeJsonParse(r))
           .catch(() => null)
       );
       
       const tickerResults = await Promise.all(tickerPromises);
       
-      // Fetch kline data for equity curve
+      // Fetch kline data for equity curve with safe parsing
       const klineResponse = await fetch(`${BYBIT_API.kline}?category=linear&symbol=BTCUSDT&interval=60&limit=90`);
-      const klineData = await klineResponse.json();
+      const klineData = await safeJsonParse(klineResponse);
       
       // Process data and calculate metrics
       const processedMetrics = calculateMetrics(tickerResults, klineData, balance);
@@ -787,11 +802,13 @@ export default function PerformanceAnalyticsPage() {
     let maxDrawdown = 0;
     let peak = balance;
     const equityPoints = calculateEquityCurve(klineData, balance);
-    equityPoints.forEach(point => {
-      if (point.equity > peak) peak = point.equity;
-      const dd = ((point.equity - peak) / peak) * 100;
-      if (dd < maxDrawdown) maxDrawdown = dd;
-    });
+    if (equityPoints) {
+      equityPoints.forEach(point => {
+        if (point && point.equity > peak) peak = point.equity;
+        const dd = ((point.equity - peak) / peak) * 100;
+        if (dd < maxDrawdown) maxDrawdown = dd;
+      });
+    }
     
     // Get current equity
     let currentEquity = balance;
@@ -806,7 +823,7 @@ export default function PerformanceAnalyticsPage() {
       winRate,
       profitFactor,
       sharpeRatio,
-      maxDrawdown,
+      maxDrawdown: maxDrawdown || 0,
       totalTrades,
       winningTrades: wins,
       losingTrades: losses,

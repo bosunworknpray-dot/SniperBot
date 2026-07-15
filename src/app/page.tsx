@@ -977,7 +977,6 @@ export default function Home() {
   const [actualBalance, setActualBalance] = useState<number>(100);
   const [baseEquity, setBaseEquity] = useState<number>(100);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const [alertIdCounter, setAlertIdCounter] = useState(0);
   const [paperEquity, setPaperEquity] = useState<number>(100);
   const [liveEquity, setLiveEquity] = useState<number>(100);
 
@@ -987,6 +986,7 @@ export default function Home() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const uptimeIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const alertIdCounterRef = useRef<number>(0);
 
   // Get API credentials
   const getApiCredentials = () => {
@@ -1071,10 +1071,11 @@ export default function Home() {
     }
   };
 
-  // Add alert
+  // Add alert - FIXED with unique ID using ref
   const addAlert = (type: Alert['type'], priority: Alert['priority'], title: string, message: string, symbol?: string, price?: number) => {
+    alertIdCounterRef.current += 1;
     const newAlert: Alert = {
-      id: `alert-${Date.now()}-${alertIdCounter}`,
+      id: `alert-${Date.now()}-${alertIdCounterRef.current}`,
       type,
       priority,
       title,
@@ -1085,7 +1086,6 @@ export default function Home() {
       symbol,
       price,
     };
-    setAlertIdCounter(prev => prev + 1);
     setAlerts(prev => [newAlert, ...prev].slice(0, 50));
   };
 

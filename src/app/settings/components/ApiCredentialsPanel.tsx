@@ -29,10 +29,10 @@ const BYBIT_API = {
   live: 'https://api.bybit.com',
 };
 
-// Fixed: Correct Bybit signature generation
+// FIXED: Correct Bybit V5 signature generation
 const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  // Bybit signature format: timestamp + apiKey + recvWindow + params
+  // Bybit V5 signature format: timestamp + apiKey + recvWindow + params
   const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
@@ -64,7 +64,7 @@ export default function ApiCredentialsPanel() {
   });
 
   const handleChange = (mode: TradingMode, field: keyof Credentials, value: string) => {
-    setCredentials((prev) => ({ ...prev, [mode]: { ...prev[mode], [field]: value } }));
+    setCredentials((prev) => ({ ...prev, [mode]: { ...prev[mode], [field]: value.trim() } }));
     setTestResult((prev) => ({ ...prev, [mode]: { status: 'idle', message: '' } }));
   };
 
@@ -77,7 +77,6 @@ export default function ApiCredentialsPanel() {
 
     const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
 
-    // First try: Get Unified Account balance
     const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
       method: 'GET',
       headers: {
@@ -88,8 +87,7 @@ export default function ApiCredentialsPanel() {
       },
     });
 
-    const data = await safeJsonParse(response);
-    return data;
+    return safeJsonParse(response);
   };
 
   // Fetch account info (UID, account type)
@@ -111,8 +109,7 @@ export default function ApiCredentialsPanel() {
       },
     });
 
-    const data = await safeJsonParse(response);
-    return data;
+    return safeJsonParse(response);
   };
 
   const handleTest = async (mode: TradingMode) => {
@@ -184,8 +181,8 @@ export default function ApiCredentialsPanel() {
         }
       }
 
-      // If both requests succeeded, consider it a success
-      if (accountInfoData?.retCode === 0 || balanceData?.retCode === 0) {
+      // If either request succeeded, consider it a success (we can get balance even if account info fails)
+      if (balanceData?.retCode === 0 || accountInfoData?.retCode === 0) {
         const balanceNum = parseFloat(balance);
         const balanceDisplay = balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
 
@@ -193,12 +190,12 @@ export default function ApiCredentialsPanel() {
           ...prev,
           [mode]: {
             status: 'success',
-            message: `Connected to ${mode === 'live' ? 'Live' : 'Testnet'} Unified Trading Account`,
+            message: `✅ Connected to ${mode === 'live' ? 'Live' : 'Testnet'} Unified Trading Account`,
             latency,
             accountInfo: {
               balance: balanceDisplay,
-              uid: uid,
-              accountType: accountType,
+              uid: uid !== 'N/A' ? uid : (balanceData?.result?.uid || 'N/A'),
+              accountType: accountType !== 'N/A' ? accountType : 'Unified',
               availableBalance: availableBalance !== '0' ? `${parseFloat(availableBalance).toFixed(2)} USDT` : '0.00 USDT',
               totalEquity: totalEquity !== '0' ? `${parseFloat(totalEquity).toFixed(2)} USDT` : '0.00 USDT',
             },
@@ -209,15 +206,15 @@ export default function ApiCredentialsPanel() {
         const errorMsg = balanceData?.retMsg || accountInfoData?.retMsg || 'Unknown error';
         let errorCode = balanceData?.retCode || accountInfoData?.retCode || 'Unknown';
         
-        let userMessage = `Error ${errorCode}: ${errorMsg}`;
+        let userMessage = `❌ Error ${errorCode}: ${errorMsg}`;
         if (errorCode === 10005) {
-          userMessage = 'Invalid API key. Please check your API key.';
+          userMessage = '❌ Invalid API key. Please check your API key.';
         } else if (errorCode === 10006) {
-          userMessage = 'Invalid API signature. Please check your API secret.';
+          userMessage = '❌ Invalid API signature. Please check your API secret.';
         } else if (errorCode === 10003) {
-          userMessage = 'Rate limit exceeded. Please try again later.';
+          userMessage = '❌ Rate limit exceeded. Please try again later.';
         } else if (errorCode === 10010) {
-          userMessage = 'API key permissions insufficient. Please ensure your API key has read permissions.';
+          userMessage = '❌ API key permissions insufficient. Please ensure your API key has read permissions.';
         }
         
         throw new Error(userMessage);
@@ -226,12 +223,12 @@ export default function ApiCredentialsPanel() {
       console.error('Connection test error:', error);
       const latency = Date.now() - start;
       
-      let userMessage = error.message || 'Failed to connect. Check your credentials and network.';
+      let userMessage = error.message || '❌ Failed to connect. Check your credentials and network.';
       
       if (error.message?.includes('fetch') || error.message?.includes('network')) {
-        userMessage = 'Network error. Please check your internet connection.';
+        userMessage = '❌ Network error. Please check your internet connection.';
       } else if (error.message?.includes('timeout')) {
-        userMessage = 'Connection timeout. Please try again.';
+        userMessage = '❌ Connection timeout. Please try again.';
       }
 
       setTestResult((prev) => ({

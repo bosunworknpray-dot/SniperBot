@@ -60,12 +60,25 @@ const BYBIT_WS = {
 };
 
 // ============== UTILITY FUNCTIONS ==============
-// FIXED: Correct signature generation for Bybit API
+// FIXED: Correct signature generation for Bybit API V5
 const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  // Bybit signature format: timestamp + apiKey + recvWindow + params
+  // Bybit V5 signature format: timestamp + apiKey + recvWindow + params
   const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
+
+// Helper to safely parse JSON
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') {
+      return null;
+    }
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
 
 const formatTime = (seconds: number): string => {
@@ -77,7 +90,7 @@ const formatTime = (seconds: number): string => {
 
 // ============== COMPONENTS ==============
 
-// API Credentials Panel
+// API Credentials Panel - FIXED
 const ApiCredentialsPanel = () => {
   const [credentials, setCredentials] = useState<ApiCredentials>({
     apiKey: '',
@@ -94,8 +107,10 @@ const ApiCredentialsPanel = () => {
   const [copied, setCopied] = useState(false);
   const [balance, setBalance] = useState<string>('');
   const [uid, setUid] = useState<string>('');
+  const [accountType, setAccountType] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
+  // FIXED: Test connection with proper signature
   const testConnection = async () => {
     if (!credentials.apiKey || !credentials.apiSecret) {
       setTestStatus('error');
@@ -114,9 +129,10 @@ const ApiCredentialsPanel = () => {
     const params = '';
 
     try {
-      // FIXED: Pass apiKey as part of signature payload
+      // Generate signature correctly
       const signature = generateSignature(credentials.apiKey, credentials.apiSecret, timestamp, recvWindow, params);
       
+      // Test wallet balance endpoint
       const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
         method: 'GET',
         headers: {
@@ -127,24 +143,76 @@ const ApiCredentialsPanel = () => {
         },
       });
 
-      const data = await response.json();
+      const data = await safeJsonParse(response);
 
-      if (data.retCode === 0 && data.result) {
+      if (data && data.retCode === 0 && data.result) {
+        // Successfully connected
         const wallet = data.result.list?.[0];
-        const totalBalance = wallet?.totalEquity || '0';
-        const accountUid = data.result.uid || 'N/A';
+        const totalEquity = wallet?.totalEquity || wallet?.equity || '0';
+        const availableBalance = wallet?.availableBalance || wallet?.available || '0';
+        const walletBalance = wallet?.walletBalance || wallet?.balance || '0';
         
-        setBalance(`${parseFloat(totalBalance).toFixed(2)} USDT`);
+        // Use totalEquity as primary balance
+        const balanceAmount = totalEquity || availableBalance || walletBalance || '0';
+        const accountUid = data.result.uid || data.result.accountUid || 'N/A';
+        
+        setBalance(`${parseFloat(balanceAmount).toFixed(2)} USDT`);
         setUid(accountUid);
+        
+        // Also fetch account info for account type
+        try {
+          const accountInfoResponse = await fetch(`${baseUrl}/v5/account/info`, {
+            method: 'GET',
+            headers: {
+              'X-BAPI-API-KEY': credentials.apiKey,
+              'X-BAPI-TIMESTAMP': timestamp,
+              'X-BAPI-SIGN': signature,
+              'X-BAPI-RECV-WINDOW': recvWindow,
+            },
+          });
+          const accountData = await safeJsonParse(accountInfoResponse);
+          if (accountData && accountData.retCode === 0 && accountData.result) {
+            setAccountType(accountData.result.accountType || accountData.result.accType || 'Unified');
+          }
+        } catch (e) {
+          // Account info fetch is optional
+        }
+        
         setTestStatus('success');
-        setTestMessage('Connection verified successfully!');
+        setTestMessage('✅ Connection verified successfully!');
         setError(null);
       } else {
-        throw new Error(data.retMsg || 'Invalid credentials or API error');
+        // Handle API error
+        const errorMsg = data?.retMsg || 'Unknown error';
+        const errorCode = data?.retCode || 'Unknown';
+        
+        let userMessage = `❌ Error ${errorCode}: ${errorMsg}`;
+        if (errorCode === 10005) {
+          userMessage = '❌ Invalid API key. Please check your API key.';
+        } else if (errorCode === 10006) {
+          userMessage = '❌ Invalid API signature. Please check your API secret.';
+        } else if (errorCode === 10003) {
+          userMessage = '❌ Rate limit exceeded. Please try again later.';
+        } else if (errorCode === 10010) {
+          userMessage = '❌ API key permissions insufficient. Please ensure your API key has read permissions.';
+        }
+        
+        setTestStatus('error');
+        setTestMessage(userMessage);
+        setError(errorMsg);
       }
     } catch (error: any) {
+      console.error('Connection test error:', error);
+      
+      let userMessage = '❌ Failed to connect. Please check your credentials and network.';
+      if (error.message?.includes('fetch') || error.message?.includes('network')) {
+        userMessage = '❌ Network error. Please check your internet connection.';
+      } else if (error.message?.includes('timeout')) {
+        userMessage = '❌ Connection timeout. Please try again.';
+      }
+      
       setTestStatus('error');
-      setTestMessage(error.message || 'Failed to connect to Bybit API');
+      setTestMessage(userMessage);
       setError(error.message);
     } finally {
       setIsTesting(false);
@@ -164,15 +232,22 @@ const ApiCredentialsPanel = () => {
     setError(null);
     
     try {
+      // Save to localStorage
       localStorage.setItem('bybit_credentials', JSON.stringify({
         apiKey: credentials.apiKey,
         apiSecret: credentials.apiSecret,
         isTestnet: credentials.isTestnet,
       }));
       
+      // Also set environment variables for runtime
+      process.env.NEXT_PUBLIC_BYBIT_API_KEY = credentials.apiKey;
+      process.env.NEXT_PUBLIC_BYBIT_API_SECRET = credentials.apiSecret;
+      process.env.NEXT_PUBLIC_BYBIT_IS_TESTNET = String(credentials.isTestnet);
+      
       setSaveStatus('success');
       setTimeout(() => setSaveStatus('idle'), 3000);
     } catch (error) {
+      console.error('Save error:', error);
       setSaveStatus('error');
       setError('Failed to save credentials');
       setTimeout(() => setSaveStatus('idle'), 3000);
@@ -187,6 +262,7 @@ const ApiCredentialsPanel = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Load saved credentials on mount
   useEffect(() => {
     const saved = localStorage.getItem('bybit_credentials');
     if (saved) {
@@ -229,14 +305,14 @@ const ApiCredentialsPanel = () => {
             <input
               type="text"
               value={credentials.apiKey}
-              onChange={(e) => setCredentials({ ...credentials, apiKey: e.target.value })}
+              onChange={(e) => setCredentials({ ...credentials, apiKey: e.target.value.trim() })}
               placeholder={credentials.isTestnet ? 'Testnet API Key' : 'Mainnet API Key'}
-              className="w-full px-3 py-2 pr-24 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
+              className="w-full px-3 py-2 pr-10 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent font-mono"
             />
             {credentials.apiKey && (
               <button
                 onClick={() => copyToClipboard(credentials.apiKey)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
               >
                 {copied ? <Check size={14} /> : <Copy size={14} />}
               </button>
@@ -252,21 +328,21 @@ const ApiCredentialsPanel = () => {
             <input
               type={showSecret ? 'text' : 'password'}
               value={credentials.apiSecret}
-              onChange={(e) => setCredentials({ ...credentials, apiSecret: e.target.value })}
+              onChange={(e) => setCredentials({ ...credentials, apiSecret: e.target.value.trim() })}
               placeholder="Enter your API secret"
-              className="w-full px-3 py-2 pr-24 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
+              className="w-full px-3 py-2 pr-20 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent font-mono"
             />
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
               <button
                 onClick={() => setShowSecret(!showSecret)}
-                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
               >
                 {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
               </button>
               {credentials.apiSecret && (
                 <button
                   onClick={() => copyToClipboard(credentials.apiSecret)}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                  className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
                 >
                   {copied ? <Check size={14} /> : <Copy size={14} />}
                 </button>
@@ -276,14 +352,14 @@ const ApiCredentialsPanel = () => {
         </div>
 
         <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+          <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer">
             <input
               type="checkbox"
               checked={credentials.isTestnet}
               onChange={(e) => setCredentials({ ...credentials, isTestnet: e.target.checked })}
               className="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
             />
-            Use Testnet
+            Use Testnet (Paper Trading)
           </label>
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-gray-400 dark:text-gray-500">Permissions:</span>
@@ -333,19 +409,50 @@ const ApiCredentialsPanel = () => {
         </div>
 
         {testStatus !== 'idle' && (
-          <div className={`p-2 rounded text-xs flex items-center gap-1 ${
+          <div className={`p-3 rounded-lg text-xs flex items-start gap-2 ${
             testStatus === 'success' 
-              ? 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400'
-              : 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400'
+              ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
+              : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
           }`}>
-            {testStatus === 'success' ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
-            {testMessage}
-            {testStatus === 'success' && balance && (
-              <span className="ml-2 font-semibold">Balance: {balance}</span>
+            {testStatus === 'success' ? (
+              <CheckCircle size={16} className="text-green-600 dark:text-green-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle size={16} className="text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
             )}
-            {testStatus === 'success' && uid && (
-              <span className="ml-2 font-semibold">UID: {uid}</span>
-            )}
+            <div className="flex-1 min-w-0">
+              <p className={testStatus === 'success' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}>
+                {testMessage}
+              </p>
+              {testStatus === 'success' && (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  {balance && (
+                    <div className="bg-white dark:bg-gray-800/80 rounded-md px-2 py-1.5">
+                      <p className="text-[10px] text-gray-500 dark:text-gray-400">Total Equity</p>
+                      <p className="text-xs font-bold font-mono text-green-600 dark:text-green-400">{balance}</p>
+                    </div>
+                  )}
+                  {accountType && (
+                    <div className="bg-white dark:bg-gray-800/80 rounded-md px-2 py-1.5">
+                      <p className="text-[10px] text-gray-500 dark:text-gray-400">Account Type</p>
+                      <p className="text-xs font-bold font-mono text-blue-600 dark:text-blue-400">{accountType}</p>
+                    </div>
+                  )}
+                  {uid && (
+                    <div className="bg-white dark:bg-gray-800/80 rounded-md px-2 py-1.5 col-span-2">
+                      <p className="text-[10px] text-gray-500 dark:text-gray-400">Account UID</p>
+                      <p className="text-xs font-bold font-mono text-gray-900 dark:text-white">{uid}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="p-2 rounded bg-red-50 dark:bg-red-900/20 text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
+            <AlertCircle size={12} />
+            {error}
           </div>
         )}
       </div>
@@ -353,7 +460,7 @@ const ApiCredentialsPanel = () => {
   );
 };
 
-// Symbol Selector Panel - Updated to fetch top 100 symbols by volume
+// Symbol Selector Panel
 const SymbolSelectorPanel = () => {
   const [symbols, setSymbols] = useState<SymbolConfig[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -373,7 +480,6 @@ const SymbolSelectorPanel = () => {
         const tickers = data.result.list;
         const defaultEnabled = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
         
-        // Map all USDT pairs with volume data
         const mappedSymbols: SymbolConfig[] = tickers
           .filter((t: any) => t.symbol.endsWith('USDT'))
           .map((t: any) => {
@@ -391,7 +497,6 @@ const SymbolSelectorPanel = () => {
           })
           .sort((a, b) => b.volumeRaw - a.volumeRaw);
 
-        // Show top 50 by default, or all if showAll is true
         const topSymbols = showAll ? mappedSymbols : mappedSymbols.slice(0, 50);
         setSymbols(topSymbols);
       } else {
@@ -618,7 +723,6 @@ const WebSocketConfigPanel = () => {
       };
 
       ws.onerror = (error) => {
-        // Don't set error state here - onclose handles reconnection
         console.warn('WebSocket error:', error);
         addLog('⚠️ WebSocket error occurred');
       };
@@ -631,7 +735,6 @@ const WebSocketConfigPanel = () => {
           clearTimeout(reconnectTimeoutRef.current);
         }
         
-        // Only attempt reconnect if not a normal closure
         if (event.code !== 1000) {
           const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
           reconnectTimeoutRef.current = setTimeout(() => {
