@@ -48,6 +48,7 @@ interface Position {
   takeProfit: number;
   positionIdx?: number;
   orderId?: string;
+  accountType?: string;
 }
 
 interface Signal {
@@ -67,6 +68,7 @@ interface Signal {
   volume: number;
   regime: string;
   signalSource: 'ml' | 'technical' | 'hybrid';
+  accountType?: string;
 }
 
 interface Trade {
@@ -84,6 +86,7 @@ interface Trade {
   status: 'open' | 'closed';
   leverage: number;
   confidence: number;
+  accountType?: string;
 }
 
 interface Alert {
@@ -106,6 +109,8 @@ interface BotStatus {
   lastAction: string;
   lastActionTime: string;
   uptime: string;
+  accountType?: string;
+  uid?: string;
 }
 
 // Helper to format price with 4 decimal places
@@ -133,18 +138,26 @@ const BYBIT_API = {
   positions: 'https://api.bybit.com/v5/position/list',
   wallet: 'https://api.bybit.com/v5/account/wallet-balance',
   kline: 'https://api.bybit.com/v5/market/kline',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
 };
 
 const BYBIT_WS = {
   linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT'];
 
 // ============== HELPERS ==============
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  const paramStr = timestamp + apiKey + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
+
+const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiKey + recvWindow;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -253,6 +266,11 @@ const DashboardHeader = ({
             {isApiConnected && (
               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
                 ● API Connected
+              </span>
+            )}
+            {botStatus.accountType && (
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800">
+                {botStatus.accountType} Account
               </span>
             )}
             <span className="flex items-center gap-1 text-xs text-gray-500">
@@ -965,6 +983,7 @@ export default function Home() {
 
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const uptimeIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -976,6 +995,44 @@ export default function Home() {
       apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
       isTestnet: true,
     };
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async () => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) return;
+
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+
+      const result = await safeJsonParse(response);
+      
+      if (result && result.retCode === 0 && result.result) {
+        const account = result.result;
+        setBotStatus(prev => ({
+          ...prev,
+          accountType: account.accountType || account.accType || 'Unified',
+          uid: account.uid || account.accountUid || 'N/A',
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching account info:', error);
+    }
   };
 
   // Fetch Bybit balance
@@ -1165,12 +1222,87 @@ export default function Home() {
     }
   };
 
+  // Connect to private WebSocket for Unified Account
+  const connectPrivateWebSocket = () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected for dashboard');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated for dashboard');
+            // Subscribe to position and wallet updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['position', 'wallet'],
+            }));
+          }
+          
+          // Handle position updates
+          if (data.topic === 'position' && data.data) {
+            fetchAllData();
+          }
+          
+          // Handle wallet updates
+          if (data.topic === 'wallet' && data.data) {
+            fetchAllData();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error (dashboard):', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected (dashboard)');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket (dashboard):', err);
+    }
+  };
+
   // Fetch all data
   const fetchAllData = async () => {
     try {
       setIsRefreshing(true);
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
       const hasApiKeys = apiKey && apiSecret;
+      
+      // Fetch account info
+      if (hasApiKeys) {
+        await fetchAccountInfo();
+      }
       
       // Fetch balance from API if available
       let balance = 100;
@@ -1192,7 +1324,7 @@ export default function Home() {
       // Fetch ticker data
       const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
         fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => r.json())
+          .then(r => safeJsonParse(r))
           .catch(() => null)
       );
       const tickerResults = await Promise.all(tickerPromises);
@@ -1260,6 +1392,7 @@ export default function Home() {
                   takeProfit: parseFloat(pos.takeProfit || 0),
                   positionIdx: parseInt(pos.positionIdx || 0),
                   orderId: pos.orderId,
+                  accountType: botStatus.accountType || 'Unified',
                 });
               }
             });
@@ -1308,6 +1441,7 @@ export default function Home() {
                 liquidationPrice: isLong ? entryPrice * 0.95 : entryPrice * 1.05,
                 stopLoss: isLong ? entryPrice * 0.98 : entryPrice * 1.02,
                 takeProfit: isLong ? entryPrice * 1.04 : entryPrice * 0.96,
+                accountType: 'Paper',
               });
               
               totalEquity += pnl;
@@ -1336,6 +1470,7 @@ export default function Home() {
                 status: 'closed',
                 leverage: 5,
                 confidence: Math.round(60 + Math.random() * 30),
+                accountType: 'Paper',
               });
             }
           }
@@ -1368,6 +1503,7 @@ export default function Home() {
               volume,
               regime: Math.abs(change24h) > 3 ? 'trending' : 'ranging',
               signalSource: confidence > 80 ? 'hybrid' : 'technical',
+              accountType: botStatus.accountType || 'Unified',
             });
 
             // High confidence signal alert
@@ -1495,6 +1631,10 @@ export default function Home() {
       wsRef.current.close();
       wsRef.current = null;
     }
+    if (privateWsRef.current) {
+      privateWsRef.current.close();
+      privateWsRef.current = null;
+    }
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -1564,6 +1704,7 @@ export default function Home() {
     disconnectWebSocket();
     setReconnectAttempts(0);
     setTimeout(connectWebSocket, 1000);
+    setTimeout(connectPrivateWebSocket, 1500);
     fetchAllData();
   }, [disconnectWebSocket, connectWebSocket]);
 
@@ -1571,6 +1712,7 @@ export default function Home() {
   useEffect(() => {
     fetchAllData();
     connectWebSocket();
+    connectPrivateWebSocket();
     
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {

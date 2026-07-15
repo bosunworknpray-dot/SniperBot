@@ -27,6 +27,7 @@ interface Position {
   positionIdx?: number;
   orderId?: string;
   orderLinkId?: string;
+  accountType?: string; // Unified account type
 }
 
 type SortKey = 'symbol' | 'unrealizedPnl' | 'confidence' | 'holdMins';
@@ -62,10 +63,21 @@ const BYBIT_WS = {
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
 
 // Helper to generate Bybit signature
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
+
+// Helper to safely parse JSON response
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
 
 export default function OpenPositionsTable() {
@@ -80,6 +92,7 @@ export default function OpenPositionsTable() {
   const [error, setError] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
   
   // New position form state
   const [selectedSymbol, setSelectedSymbol] = useState('BTCUSDT');
@@ -89,6 +102,7 @@ export default function OpenPositionsTable() {
 
   // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -121,7 +135,7 @@ export default function OpenPositionsTable() {
       
       // Step 1: Set leverage
       const leverageParams = `category=linear&symbol=${selectedSymbol}&buyLeverage=${tradeLeverage}&sellLeverage=${tradeLeverage}`;
-      const leverageSignature = generateSignature(apiSecret, timestamp, recvWindow, leverageParams);
+      const leverageSignature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, leverageParams);
       
       const leverageResponse = await fetch(`${baseUrl}/v5/position/set-leverage`, {
         method: 'POST',
@@ -140,8 +154,8 @@ export default function OpenPositionsTable() {
         }),
       });
       
-      const leverageData = await leverageResponse.json();
-      if (leverageData.retCode !== 0) {
+      const leverageData = await safeJsonParse(leverageResponse);
+      if (leverageData && leverageData.retCode !== 0) {
         toast.error(`Failed to set leverage: ${leverageData.retMsg}`);
         setIsExecuting(false);
         return;
@@ -150,7 +164,7 @@ export default function OpenPositionsTable() {
       // Step 2: Place the order
       const side = tradeSide === 'long' ? 'Buy' : 'Sell';
       const orderParams = `category=linear&symbol=${selectedSymbol}&side=${side}&orderType=Market&qty=${tradeSize}&timeInForce=GTC`;
-      const orderSignature = generateSignature(apiSecret, timestamp, recvWindow, orderParams);
+      const orderSignature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, orderParams);
       
       const orderResponse = await fetch(`${baseUrl}/v5/order/create`, {
         method: 'POST',
@@ -171,18 +185,17 @@ export default function OpenPositionsTable() {
         }),
       });
 
-      const orderData = await orderResponse.json();
+      const orderData = await safeJsonParse(orderResponse);
       
-      if (orderData.retCode === 0) {
+      if (orderData && orderData.retCode === 0) {
         toast.success(`✅ Position opened: ${tradeSide.toUpperCase()} ${selectedSymbol}`, {
           description: `Size: ${tradeSize} @ ${tradeLeverage}x leverage`,
         });
-        // Refresh positions to show the new position
         await fetchPositions();
         setError(null);
       } else {
-        toast.error(`❌ Order failed: ${orderData.retMsg}`);
-        setError(`Failed to open position: ${orderData.retMsg}`);
+        toast.error(`❌ Order failed: ${orderData?.retMsg || 'Unknown error'}`);
+        setError(`Failed to open position: ${orderData?.retMsg || 'Unknown error'}`);
       }
     } catch (err) {
       console.error('Error opening position:', err);
@@ -190,6 +203,40 @@ export default function OpenPositionsTable() {
       setError('Failed to open position. Please try again.');
     } finally {
       setIsExecuting(false);
+    }
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
+    try {
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+      
+      const data = await safeJsonParse(response);
+      
+      if (data && data.retCode === 0 && data.result) {
+        const result = data.result;
+        setAccountInfo({
+          uid: result.uid || result.accountUid || 'N/A',
+          accountType: result.accountType || result.accType || 'Unified',
+        });
+      }
+    } catch (err) {
+      console.error('Error fetching account info:', err);
     }
   };
 
@@ -204,7 +251,7 @@ export default function OpenPositionsTable() {
       // Always fetch market data for real-time prices
       const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
         fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => r.json())
+          .then(r => safeJsonParse(r))
           .catch(() => null)
       );
       const tickerResults = await Promise.all(tickerPromises);
@@ -219,19 +266,22 @@ export default function OpenPositionsTable() {
       });
       
       if (!apiKey || !apiSecret) {
-        // No API keys - use demo data with real prices
+        setIsApiConnected(false);
         await fetchDemoPositions(priceMap);
         return;
       }
+
+      // Fetch account info for Unified Account
+      await fetchAccountInfo(apiKey, apiSecret, isTestnet);
 
       const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
       const timestamp = Date.now().toString();
       const recvWindow = '5000';
       const params = '';
       
-      const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
       
-      // Fetch positions
+      // Fetch positions - Unified Account uses the same endpoint
       const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
         method: 'GET',
         headers: {
@@ -242,9 +292,9 @@ export default function OpenPositionsTable() {
         },
       });
       
-      const positionsData = await positionsResponse.json();
+      const positionsData = await safeJsonParse(positionsResponse);
       
-      if (positionsData.retCode === 0 && positionsData.result?.list) {
+      if (positionsData && positionsData.retCode === 0 && positionsData.result?.list) {
         const positionData: Position[] = [];
         let totalExposure = 0;
         
@@ -263,8 +313,8 @@ export default function OpenPositionsTable() {
               id: `pos-${pos.symbol}-${pos.positionIdx}`,
               symbol: pos.symbol,
               direction: side,
-              entryPrice: entryPrice,
-              currentPrice: currentPrice,
+              entryPrice: Math.round(entryPrice * 10000) / 10000,
+              currentPrice: Math.round(currentPrice * 10000) / 10000,
               size: Math.abs(size),
               leverage: parseFloat(pos.leverage || 5),
               unrealizedPnl: pnl,
@@ -279,6 +329,7 @@ export default function OpenPositionsTable() {
               holdMins: Math.floor((Date.now() - parseInt(pos.createdTime)) / 60000),
               positionIdx: parseInt(pos.positionIdx || 0),
               orderId: pos.orderId,
+              accountType: accountInfo?.accountType || 'Unified',
             });
           }
         });
@@ -287,7 +338,7 @@ export default function OpenPositionsTable() {
         setPortfolioHeat(Math.min(10, totalExposure / 1000));
         setIsApiConnected(true);
       } else {
-        setError('Failed to fetch positions from Bybit');
+        setError(positionsData?.retMsg || 'Failed to fetch positions from Bybit');
         await fetchDemoPositions(priceMap);
       }
     } catch (err) {
@@ -318,8 +369,8 @@ export default function OpenPositionsTable() {
           id: `pos-${symbol.toLowerCase()}-${Date.now()}`,
           symbol,
           direction: isLong ? 'long' : 'short',
-          entryPrice,
-          currentPrice: price,
+          entryPrice: Math.round(entryPrice * 10000) / 10000,
+          currentPrice: Math.round(price * 10000) / 10000,
           size: parseFloat((0.01 + Math.random() * 0.05).toFixed(3)),
           leverage: 5,
           unrealizedPnl: pnl * 100,
@@ -360,7 +411,7 @@ export default function OpenPositionsTable() {
       
       const side = position.direction === 'long' ? 'Sell' : 'Buy';
       const params = `category=linear&symbol=${position.symbol}&side=${side}&orderType=Market&qty=${position.size}&timeInForce=GTC&positionIdx=${position.positionIdx || 0}`;
-      const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
       
       const response = await fetch(`${baseUrl}/v5/order/create`, {
         method: 'POST',
@@ -382,16 +433,16 @@ export default function OpenPositionsTable() {
         }),
       });
 
-      const data = await response.json();
+      const data = await safeJsonParse(response);
       
-      if (data.retCode === 0) {
+      if (data && data.retCode === 0) {
         toast.success(`Position closed — ${position.symbol}`, {
           description: `Market order submitted successfully.`,
         });
         await fetchPositions();
         return true;
       } else {
-        toast.error(`Failed to close position: ${data.retMsg}`);
+        toast.error(`Failed to close position: ${data?.retMsg || 'Unknown error'}`);
         return false;
       }
     } catch (err) {
@@ -408,7 +459,7 @@ export default function OpenPositionsTable() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log('Public WebSocket connected');
         setReconnectAttempts(0);
         ws.send(JSON.stringify({
           op: 'subscribe',
@@ -433,7 +484,7 @@ export default function OpenPositionsTable() {
                   
                   return {
                     ...pos,
-                    currentPrice: price,
+                    currentPrice: Math.round(price * 10000) / 10000,
                     unrealizedPnl: pnl,
                     unrealizedPct: pnlPct,
                     holdMins: Math.floor((Date.now() - new Date(pos.openedAt).getTime()) / 60000),
@@ -471,10 +522,80 @@ export default function OpenPositionsTable() {
     }
   };
 
+  // Connect to private WebSocket for position updates (Unified Account)
+  const connectPrivateWebSocket = async () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, '');
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated');
+            // Subscribe to position updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['position', 'execution', 'order'],
+            }));
+          }
+          
+          // Handle position updates
+          if (data.topic === 'position' && data.data) {
+            // Refresh positions when there's a position update
+            fetchPositions();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error:', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket:', err);
+    }
+  };
+
   const disconnectWebSocket = () => {
     if (wsRef.current) {
       wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
+    }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
     }
     stopHeartbeat();
     if (reconnectTimeoutRef.current) {
@@ -504,6 +625,7 @@ export default function OpenPositionsTable() {
   useEffect(() => {
     fetchPositions();
     connectWebSocket();
+    connectPrivateWebSocket();
     
     const interval = setInterval(() => {
       fetchPositions();
@@ -661,6 +783,11 @@ export default function OpenPositionsTable() {
           <div className="flex items-center gap-3">
             <h3 className="text-sm font-semibold text-foreground">
               Open Positions
+              {accountInfo && (
+                <span className="ml-2 text-[10px] font-normal text-muted-foreground">
+                  {accountInfo.accountType} Account
+                </span>
+              )}
             </h3>
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-positive-subtle text-positive border border-positive/20">
               {positions.length} active

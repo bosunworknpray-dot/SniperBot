@@ -33,6 +33,7 @@ interface Trade {
   orderId?: string;
   tradeType?: 'market' | 'limit';
   positionIdx?: number;
+  accountType?: string;
 }
 
 interface Position {
@@ -87,10 +88,12 @@ const BYBIT_API = {
   cancelOrder: 'https://api.bybit.com/v5/order/cancel',
   setLeverage: 'https://api.bybit.com/v5/position/set-leverage',
   setTradingStop: 'https://api.bybit.com/v5/position/trading-stop',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
 };
 
 const BYBIT_WS = {
   linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
 // Supported symbols
@@ -100,9 +103,9 @@ const SUPPORTED_SYMBOLS = [
 ];
 
 // Helper to generate Bybit signature
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -142,9 +145,11 @@ export default function TradeLogsPage() {
   const [tradeSize, setTradeSize] = useState(0.001);
   const [tradeLeverage, setTradeLeverage] = useState(5);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
 
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -156,6 +161,50 @@ export default function TradeLogsPage() {
       apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
       isTestnet: true,
     };
+  };
+
+  // Generate WebSocket authentication signature
+  const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+    const crypto = require('crypto');
+    const paramStr = timestamp + apiKey + recvWindow;
+    return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
+    try {
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+      
+      const data = await safeJsonParse(response);
+      
+      if (data && data.retCode === 0 && data.result) {
+        const result = data.result;
+        setAccountInfo({
+          uid: result.uid || result.accountUid || 'N/A',
+          accountType: result.accountType || result.accType || 'Unified',
+        });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Error fetching account info:', err);
+      return false;
+    }
   };
 
   // Execute a trade on Bybit
@@ -176,7 +225,7 @@ export default function TradeLogsPage() {
       
       // First, set leverage
       const leverageParams = `category=linear&symbol=${selectedSymbol}&buyLeverage=${tradeLeverage}&sellLeverage=${tradeLeverage}`;
-      const leverageSignature = generateSignature(apiSecret, timestamp, recvWindow, leverageParams);
+      const leverageSignature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, leverageParams);
       
       await fetch(`${baseUrl}/v5/position/set-leverage`, {
         method: 'POST',
@@ -198,7 +247,7 @@ export default function TradeLogsPage() {
       // Place the order
       const side = tradeSide === 'LONG' ? 'Buy' : 'Sell';
       const orderParams = `category=linear&symbol=${selectedSymbol}&side=${side}&orderType=Market&qty=${tradeSize}&timeInForce=GTC`;
-      const orderSignature = generateSignature(apiSecret, timestamp, recvWindow, orderParams);
+      const orderSignature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, orderParams);
       
       const orderResponse = await fetch(`${baseUrl}/v5/order/create`, {
         method: 'POST',
@@ -259,7 +308,7 @@ export default function TradeLogsPage() {
 
       const side = position.side === 'LONG' ? 'Sell' : 'Buy';
       const params = `category=linear&symbol=${symbol}&side=${side}&orderType=Market&qty=${Math.abs(position.size)}&timeInForce=GTC&positionIdx=${positionIdx}`;
-      const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
       
       const response = await fetch(`${baseUrl}/v5/order/create`, {
         method: 'POST',
@@ -306,12 +355,15 @@ export default function TradeLogsPage() {
         return;
       }
 
+      // Fetch account info for Unified Account
+      await fetchAccountInfo(apiKey, apiSecret, isTestnet);
+
       const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
       const timestamp = Date.now().toString();
       const recvWindow = '5000';
       const params = '';
       
-      const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
       
       // Fetch positions with safe parsing
       const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
@@ -348,12 +400,15 @@ export default function TradeLogsPage() {
           const size = parseFloat(pos.size);
           if (size !== 0) {
             const side = pos.side === 'Buy' ? 'LONG' : 'SHORT';
+            const entryPrice = parseFloat(pos.avgPrice);
+            const markPrice = parseFloat(pos.markPrice);
+            
             newPositions.push({
               symbol: pos.symbol,
               side: side,
               size: Math.abs(size),
-              entryPrice: parseFloat(pos.avgPrice),
-              markPrice: parseFloat(pos.markPrice),
+              entryPrice: Math.round(entryPrice * 10000) / 10000,
+              markPrice: Math.round(markPrice * 10000) / 10000,
               leverage: parseFloat(pos.leverage),
               unrealisedPnl: parseFloat(pos.unrealisedPnl || 0),
               liqPrice: parseFloat(pos.liqPrice || 0),
@@ -361,14 +416,14 @@ export default function TradeLogsPage() {
             });
             
             newTrades.push({
-              id: `pos-${pos.symbol}-${Date.now()}`,
+              id: `pos-${pos.symbol}-${pos.positionIdx}`,
               symbol: pos.symbol,
               side: side,
-              entryPrice: parseFloat(pos.avgPrice),
-              exitPrice: parseFloat(pos.markPrice),
+              entryPrice: Math.round(entryPrice * 10000) / 10000,
+              exitPrice: Math.round(markPrice * 10000) / 10000,
               size: Math.abs(size),
               pnl: parseFloat(pos.unrealisedPnl || 0),
-              pnlPct: parseFloat(pos.avgPrice) > 0 ? (parseFloat(pos.unrealisedPnl || 0) / (parseFloat(pos.avgPrice) * Math.abs(size))) * 100 : 0,
+              pnlPct: entryPrice > 0 ? (parseFloat(pos.unrealisedPnl || 0) / (entryPrice * Math.abs(size))) * 100 : 0,
               confidence: 75 + Math.random() * 20,
               regime: 'trending',
               entryTime: new Date(parseInt(pos.createdTime)).toLocaleTimeString(),
@@ -384,6 +439,7 @@ export default function TradeLogsPage() {
               orderId: pos.orderId,
               tradeType: 'market',
               positionIdx: parseInt(pos.positionIdx || 0),
+              accountType: accountInfo?.accountType || 'Unified',
             });
           }
         });
@@ -405,8 +461,8 @@ export default function TradeLogsPage() {
               id: `order-${order.orderId}`,
               symbol: order.symbol,
               side: side,
-              entryPrice: entryPrice,
-              exitPrice: entryPrice * (1 + (Math.random() - 0.5) * 0.02),
+              entryPrice: Math.round(entryPrice * 10000) / 10000,
+              exitPrice: Math.round(entryPrice * (1 + (Math.random() - 0.5) * 0.02) * 10000) / 10000,
               size: size,
               pnl: (Math.random() - 0.3) * 10,
               pnlPct: (Math.random() - 0.3) * 5,
@@ -425,6 +481,7 @@ export default function TradeLogsPage() {
               orderId: order.orderId,
               tradeType: order.orderType === 'Market' ? 'market' : 'limit',
               positionIdx: parseInt(order.positionIdx || 0),
+              accountType: accountInfo?.accountType || 'Unified',
             });
           }
         });
@@ -515,6 +572,7 @@ export default function TradeLogsPage() {
       status: isOpen ? 'open' : 'closed',
       leverage: 5,
       liquidationPrice: isLong ? entryPrice * 0.95 : entryPrice * 1.05,
+      accountType: 'Demo',
     };
   };
 
@@ -531,6 +589,71 @@ export default function TradeLogsPage() {
       await fetchDemoTrades();
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Connect to private WebSocket for real-time trade updates
+  const connectPrivateWebSocket = () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected for trade logs');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated for trade logs');
+            // Subscribe to execution and order updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['execution', 'order'],
+            }));
+          }
+          
+          // Handle execution updates (new trades)
+          if (data.topic === 'execution' && data.data) {
+            fetchTradeData();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error (trade logs):', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected (trade logs)');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket (trade logs):', err);
     }
   };
 
@@ -599,6 +722,10 @@ export default function TradeLogsPage() {
       wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
     }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
+    }
     stopHeartbeat();
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -640,7 +767,7 @@ export default function TradeLogsPage() {
               : (p.entryPrice - price) * p.size;
             return {
               ...p,
-              markPrice: price,
+              markPrice: Math.round(price * 10000) / 10000,
               unrealisedPnl: pnl,
             };
           }
@@ -673,6 +800,7 @@ export default function TradeLogsPage() {
   useEffect(() => {
     fetchTradeData();
     connectWebSocket();
+    connectPrivateWebSocket();
     
     scanIntervalRef.current = setInterval(() => {
       if (connectionStatus === 'disconnected') {
@@ -831,6 +959,9 @@ export default function TradeLogsPage() {
                 )}
                 {isApiConnected && (
                   <span className="text-xs text-blue-600 dark:text-blue-400">● API Connected</span>
+                )}
+                {accountInfo && (
+                  <span className="text-xs text-muted-foreground">● {accountInfo.accountType} Account</span>
                 )}
               </p>
             </div>
@@ -1260,6 +1391,9 @@ export default function TradeLogsPage() {
             )}
             {isApiConnected && (
               <span className="text-green-600 dark:text-green-400">● Live data from Bybit</span>
+            )}
+            {accountInfo && (
+              <span className="text-muted-foreground">● {accountInfo.accountType} Account</span>
             )}
           </div>
           <div className="flex items-center gap-2">

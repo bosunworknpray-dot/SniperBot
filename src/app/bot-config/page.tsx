@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { 
   Bot, Save, RotateCcw, ChevronDown, ChevronUp, Info, AlertCircle, CheckCircle, Clock,
-  Wifi, WifiOff, Loader2, RefreshCw, X
+  Wifi, WifiOff, Loader2, RefreshCw, X, Shield, Key, Database
 } from 'lucide-react';
 
 interface ConfigSection {
@@ -48,8 +48,10 @@ interface MarketStatus {
   volume24h: number;
   avgVolatility: number;
   activePositions: number;
-  connectionStatus: 'connected' | 'disconnected' | 'connecting' | 'error';
+  connectionStatus: 'connected' | 'disconnected' | 'connecting' | 'error' | 'authenticated';
   lastUpdate: Date;
+  accountType?: string;
+  uid?: string;
 }
 
 const DEFAULT_CONFIG: BotConfig = {
@@ -81,18 +83,28 @@ const BYBIT_API = {
   spot: 'https://api.bybit.com/v5/market/tickers',
   kline: 'https://api.bybit.com/v5/market/kline',
   positions: 'https://api.bybit.com/v5/position/list',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
+  wallet: 'https://api.bybit.com/v5/account/wallet-balance',
 };
 
 const BYBIT_WS = {
   linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT'];
 
 // Helper to generate Bybit signature
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  const paramStr = timestamp + apiKey + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
+
+// Helper to generate WebSocket authentication signature
+const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiKey + recvWindow;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -124,6 +136,7 @@ export default function BotConfigPage() {
 
   // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -134,6 +147,44 @@ export default function BotConfigPage() {
       apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
       isTestnet: true,
     };
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async () => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) return;
+
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+
+      const result = await response.json();
+      
+      if (result && result.retCode === 0 && result.result) {
+        const account = result.result;
+        setMarketStatus(prev => ({
+          ...prev,
+          accountType: account.accountType || account.accType || 'Unified',
+          uid: account.uid || account.accountUid || 'N/A',
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching account info:', error);
+    }
   };
 
   // Track changes
@@ -159,6 +210,11 @@ export default function BotConfigPage() {
     try {
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
       const hasApiKeys = apiKey && apiSecret;
+      
+      // Fetch account info
+      if (hasApiKeys) {
+        await fetchAccountInfo();
+      }
       
       // Always fetch ticker data
       const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
@@ -190,7 +246,7 @@ export default function BotConfigPage() {
         const recvWindow = '5000';
         const params = '';
         
-        const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
         
         const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
           method: 'GET',
@@ -220,14 +276,14 @@ export default function BotConfigPage() {
         activePositions = Math.floor(Math.random() * 3) + 1;
       }
       
-      setMarketStatus({
+      setMarketStatus(prev => ({
+        ...prev,
         symbols: validCount,
         volume24h: totalVolume,
         avgVolatility: validCount > 0 ? (totalVolatility / validCount) * 100 : 0,
         activePositions: activePositions,
-        connectionStatus: marketStatus.connectionStatus,
         lastUpdate: new Date(),
-      });
+      }));
       
       setError(null);
     } catch (error) {
@@ -247,7 +303,7 @@ export default function BotConfigPage() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log('Public WebSocket connected');
         setMarketStatus(prev => ({ ...prev, connectionStatus: 'connected' }));
         setReconnectAttempts(0);
         setError(null);
@@ -275,12 +331,11 @@ export default function BotConfigPage() {
       };
 
       ws.onerror = (event) => {
-        console.warn('WebSocket error:', event);
-        // Don't set error state here - onclose handles reconnection
+        console.warn('Public WebSocket error:', event);
       };
 
       ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code);
+        console.log('Public WebSocket disconnected:', event.code);
         setMarketStatus(prev => ({ ...prev, connectionStatus: 'disconnected' }));
         stopHeartbeat();
         
@@ -298,8 +353,80 @@ export default function BotConfigPage() {
         }
       };
     } catch (err) {
-      console.error('Failed to connect WebSocket:', err);
+      console.error('Failed to connect public WebSocket:', err);
       setMarketStatus(prev => ({ ...prev, connectionStatus: 'error' }));
+    }
+  };
+
+  // Connect to private WebSocket for Unified Account
+  const connectPrivateWebSocket = () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated');
+            setMarketStatus(prev => ({ ...prev, connectionStatus: 'authenticated' }));
+            
+            // Subscribe to position and wallet updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['position', 'wallet'],
+            }));
+          }
+          
+          // Handle position updates
+          if (data.topic === 'position' && data.data) {
+            fetchMarketStatus();
+          }
+          
+          // Handle wallet updates
+          if (data.topic === 'wallet' && data.data) {
+            fetchMarketStatus();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error:', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket:', err);
     }
   };
 
@@ -307,6 +434,10 @@ export default function BotConfigPage() {
     if (wsRef.current) {
       wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
+    }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
     }
     stopHeartbeat();
     if (reconnectTimeoutRef.current) {
@@ -337,10 +468,11 @@ export default function BotConfigPage() {
   useEffect(() => {
     fetchMarketStatus();
     connectWebSocket();
+    connectPrivateWebSocket();
     
     // Refresh every 60 seconds
     const interval = setInterval(() => {
-      if (marketStatus.connectionStatus === 'disconnected') {
+      if (marketStatus.connectionStatus === 'disconnected' || marketStatus.connectionStatus === 'error') {
         fetchMarketStatus();
       }
     }, 60000);
@@ -363,7 +495,6 @@ export default function BotConfigPage() {
 
   const handleSave = async () => {
     try {
-      // Save to localStorage
       localStorage.setItem('bot_config', JSON.stringify(config));
       
       setSaved(true);
@@ -393,6 +524,7 @@ export default function BotConfigPage() {
     disconnectWebSocket();
     setReconnectAttempts(0);
     setTimeout(connectWebSocket, 1000);
+    setTimeout(connectPrivateWebSocket, 1500);
     fetchMarketStatus();
   };
 
@@ -448,10 +580,31 @@ export default function BotConfigPage() {
 
   const getConnectionIcon = () => {
     switch (marketStatus.connectionStatus) {
-      case 'connected': return <Wifi size={14} className="text-green-500" />;
-      case 'connecting': return <Loader2 size={14} className="text-yellow-500 animate-spin" />;
-      case 'error': return <WifiOff size={14} className="text-red-500" />;
-      default: return <WifiOff size={14} className="text-gray-500" />;
+      case 'authenticated':
+        return <span className="text-green-500">●</span>;
+      case 'connected':
+        return <Wifi size={14} className="text-green-500" />;
+      case 'connecting':
+        return <Loader2 size={14} className="text-yellow-500 animate-spin" />;
+      case 'error':
+        return <WifiOff size={14} className="text-red-500" />;
+      default:
+        return <WifiOff size={14} className="text-gray-500" />;
+    }
+  };
+
+  const getConnectionText = () => {
+    switch (marketStatus.connectionStatus) {
+      case 'authenticated':
+        return 'Authenticated';
+      case 'connected':
+        return 'Connected';
+      case 'connecting':
+        return 'Connecting...';
+      case 'error':
+        return 'Error';
+      default:
+        return 'Disconnected';
     }
   };
 
@@ -486,15 +639,27 @@ export default function BotConfigPage() {
               <h1 className="text-xl font-bold text-gray-900 dark:text-white">
                 Bot Configuration
               </h1>
-              <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
+              <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2 flex-wrap">
                 Configure trading parameters, execution settings, and ML models
                 <span className="flex items-center gap-1 text-xs">
                   {getConnectionIcon()}
-                  <span className="capitalize">{marketStatus.connectionStatus}</span>
+                  <span className={`capitalize ${
+                    marketStatus.connectionStatus === 'authenticated' ? 'text-green-600 dark:text-green-400' :
+                    marketStatus.connectionStatus === 'connected' ? 'text-green-600 dark:text-green-400' :
+                    marketStatus.connectionStatus === 'error' ? 'text-red-600 dark:text-red-400' :
+                    'text-gray-500 dark:text-gray-400'
+                  }`}>
+                    {getConnectionText()}
+                  </span>
                 </span>
                 {isApiConnected && (
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
                     ● API Connected
+                  </span>
+                )}
+                {marketStatus.accountType && (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800">
+                    {marketStatus.accountType} Account
                   </span>
                 )}
               </p>
@@ -564,7 +729,7 @@ export default function BotConfigPage() {
         {/* Market Status Banner */}
         <div className="flex flex-wrap items-center gap-4 p-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/50">
           <div className="flex items-center gap-2">
-            <RefreshCw size={14} className="text-gray-400" />
+            <Database size={14} className="text-gray-400" />
             <span className="text-xs text-gray-500 dark:text-gray-400">Market Status</span>
           </div>
           <div className="flex items-center gap-4 text-xs">
@@ -580,10 +745,15 @@ export default function BotConfigPage() {
             <span className="text-gray-600 dark:text-gray-300">
               Active Positions: <span className="font-semibold text-gray-900 dark:text-white">{marketStatus.activePositions}</span>
             </span>
+            {marketStatus.uid && (
+              <span className="text-gray-600 dark:text-gray-300">
+                UID: <span className="font-semibold text-gray-900 dark:text-white">{marketStatus.uid}</span>
+              </span>
+            )}
             <span className="text-gray-400">
               Updated: {marketStatus.lastUpdate.toLocaleTimeString()}
             </span>
-            {marketStatus.connectionStatus === 'error' && (
+            {(marketStatus.connectionStatus === 'error' || marketStatus.connectionStatus === 'disconnected') && (
               <button
                 onClick={handleReconnect}
                 className="text-xs text-blue-600 dark:text-blue-400 hover:underline"

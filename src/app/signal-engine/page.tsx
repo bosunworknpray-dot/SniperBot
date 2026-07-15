@@ -33,6 +33,7 @@ interface Signal {
   change24h: number;
   price24hHigh: number;
   price24hLow: number;
+  accountType?: string;
 }
 
 interface Indicator {
@@ -58,15 +59,28 @@ const formatPrice = (price: number): string => {
   return `$${formatPriceDisplay(price)}`;
 };
 
+// Helper to safely parse JSON response
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
 // Bybit API endpoints
 const BYBIT_API = {
   spot: 'https://api.bybit.com/v5/market/tickers',
   kline: 'https://api.bybit.com/v5/market/kline',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
 };
 
 // WebSocket connection for live data
 const BYBIT_WS = {
   linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
 // Supported symbols for scanning
@@ -114,12 +128,67 @@ export default function SignalEnginePage() {
   const [marketData, setMarketData] = useState<Record<string, any>>({});
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
 
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Get API credentials
+  const getApiCredentials = () => {
+    return {
+      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+      isTestnet: true,
+    };
+  };
+
+  // Generate WebSocket authentication signature
+  const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+    const crypto = require('crypto');
+    const paramStr = timestamp + apiKey + recvWindow;
+    return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
+    try {
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+      
+      const data = await safeJsonParse(response);
+      
+      if (data && data.retCode === 0 && data.result) {
+        const result = data.result;
+        setAccountInfo({
+          uid: result.uid || result.accountUid || 'N/A',
+          accountType: result.accountType || result.accType || 'Unified',
+        });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Error fetching account info:', err);
+      return false;
+    }
+  };
 
   // Fetch market data and generate signals
   const fetchMarketDataAndGenerateSignals = async () => {
@@ -128,13 +197,19 @@ export default function SignalEnginePage() {
       const newSignals: Signal[] = [];
       const marketDataMap: Record<string, any> = {};
 
+      // Fetch account info if API keys exist
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (apiKey && apiSecret) {
+        await fetchAccountInfo(apiKey, apiSecret, isTestnet);
+      }
+
       // Fetch data for all symbols
       const promises = SUPPORTED_SYMBOLS.map(async (symbol) => {
         try {
           const response = await fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`);
-          const data = await response.json();
+          const data = await safeJsonParse(response);
           
-          if (data.retCode === 0 && data.result?.list?.length > 0) {
+          if (data && data.retCode === 0 && data.result?.list?.length > 0) {
             const ticker = data.result.list[0];
             marketDataMap[symbol] = ticker;
             
@@ -254,7 +329,74 @@ export default function SignalEnginePage() {
       change24h: change24h,
       price24hHigh: high24h,
       price24hLow: low24h,
+      accountType: accountInfo?.accountType || 'Unified',
     };
+  };
+
+  // Connect to private WebSocket for real-time signal execution updates
+  const connectPrivateWebSocket = () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected for signals');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated for signals');
+            // Subscribe to order updates for signal execution tracking
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['order', 'execution'],
+            }));
+          }
+          
+          // Handle order updates - refresh signals when orders are executed
+          if (data.topic === 'order' && data.data) {
+            // Refresh signals when there's an order update
+            fetchMarketDataAndGenerateSignals();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error (signals):', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected (signals)');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket (signals):', err);
+    }
   };
 
   // WebSocket connection for real-time updates
@@ -329,6 +471,10 @@ export default function SignalEnginePage() {
       wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
     }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
+    }
     stopHeartbeat();
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -395,6 +541,7 @@ export default function SignalEnginePage() {
   useEffect(() => {
     fetchMarketDataAndGenerateSignals();
     connectWebSocket();
+    connectPrivateWebSocket();
 
     // Periodic market scan every 2 minutes
     scanIntervalRef.current = setInterval(() => {
@@ -560,6 +707,9 @@ export default function SignalEnginePage() {
                     {getConnectionText()}
                   </span>
                 </span>
+                {accountInfo && (
+                  <span className="text-[10px] text-muted-foreground">● {accountInfo.accountType} Account</span>
+                )}
               </p>
             </div>
           </div>

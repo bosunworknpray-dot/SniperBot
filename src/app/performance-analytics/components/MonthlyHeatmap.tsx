@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Loader2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Loader2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 
 interface HeatmapCell {
   day: number;
@@ -22,6 +22,33 @@ interface HeatmapStats {
 // Bybit API endpoints
 const BYBIT_API = {
   kline: 'https://api.bybit.com/v5/market/kline',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
+  spot: 'https://api.bybit.com/v5/market/tickers',
+};
+
+const BYBIT_WS = {
+  linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
+};
+
+const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
+
+// Helper to safely parse JSON
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+// Helper to generate Bybit signature
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiKey + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -53,11 +80,84 @@ export default function MonthlyHeatmap() {
     bestDay: 0,
     worstDay: 0,
   });
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting' | 'authenticated'>('connecting');
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
+
+  // WebSocket refs
+  const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Get API credentials
+  const getApiCredentials = () => {
+    return {
+      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+      isTestnet: true,
+    };
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async () => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) return;
+
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+
+      const result = await safeJsonParse(response);
+      
+      if (result && result.retCode === 0 && result.result) {
+        const account = result.result;
+        setAccountInfo({
+          uid: account.uid || account.accountUid || 'N/A',
+          accountType: account.accountType || account.accType || 'Unified',
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching account info:', error);
+    }
+  };
+
+  // Fetch current price for real-time updates
+  const fetchCurrentPrice = async (): Promise<number> => {
+    try {
+      const response = await fetch(`${BYBIT_API.spot}?category=linear&symbol=BTCUSDT`);
+      const result = await safeJsonParse(response);
+      
+      if (result && result.retCode === 0 && result.result?.list?.length > 0) {
+        return parseFloat(result.result.list[0].lastPrice);
+      }
+      return 0;
+    } catch {
+      return 0;
+    }
+  };
 
   const fetchData = async () => {
     try {
       setIsLoading(true);
       setError(null);
+
+      // Fetch account info
+      await fetchAccountInfo();
 
       // Fetch daily kline data for the current month (30 days)
       const response = await fetch(`${BYBIT_API.kline}?category=linear&symbol=BTCUSDT&interval=D&limit=30`);
@@ -66,14 +166,17 @@ export default function MonthlyHeatmap() {
         throw new Error('Failed to fetch kline data');
       }
       
-      const result = await response.json();
+      const result = await safeJsonParse(response);
       
-      if (result.retCode === 0 && result.result?.list) {
+      if (result && result.retCode === 0 && result.result?.list) {
         const klines = result.result.list;
         const now = new Date();
         const currentMonth = now.getMonth();
         const currentYear = now.getFullYear();
         const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+        
+        // Get current price for today's update
+        const currentPrice = await fetchCurrentPrice();
         
         // Get the first day of the month to calculate starting weekday
         const firstDayOfMonth = new Date(currentYear, currentMonth, 1).getDay();
@@ -97,13 +200,37 @@ export default function MonthlyHeatmap() {
         // Build calendar for the month
         for (let day = 1; day <= daysInMonth; day++) {
           const kline = klineMap.get(day);
+          const isToday = day === now.getDate();
           
-          if (kline) {
-            const open = parseFloat(kline[1]);
-            const close = parseFloat(kline[4]);
-            const high = parseFloat(kline[2]);
-            const low = parseFloat(kline[3]);
-            const volume = parseFloat(kline[5]);
+          if (kline || isToday) {
+            let open: number, close: number, high: number, low: number, volume: number;
+            
+            if (isToday && currentPrice > 0) {
+              // Use today's data from kline if available, else use current price
+              if (kline) {
+                open = parseFloat(kline[1]);
+                close = parseFloat(kline[4]);
+                high = parseFloat(kline[2]);
+                low = parseFloat(kline[3]);
+                volume = parseFloat(kline[5]);
+              } else {
+                // Use yesterday's close as open and current price as close
+                const yesterday = klineMap.get(day - 1);
+                open = yesterday ? parseFloat(yesterday[4]) : currentPrice * 0.99;
+                close = currentPrice;
+                high = Math.max(open, close) * 1.01;
+                low = Math.min(open, close) * 0.99;
+                volume = 1e8;
+              }
+            } else if (kline) {
+              open = parseFloat(kline[1]);
+              close = parseFloat(kline[4]);
+              high = parseFloat(kline[2]);
+              low = parseFloat(kline[3]);
+              volume = parseFloat(kline[5]);
+            } else {
+              continue;
+            }
             
             // Calculate actual price change
             const change = open > 0 ? ((close - open) / open) * 100 : 0;
@@ -153,7 +280,7 @@ export default function MonthlyHeatmap() {
         
         setError(null);
       } else {
-        throw new Error(result.retMsg || 'Failed to fetch kline data');
+        throw new Error(result?.retMsg || 'Failed to fetch kline data');
       }
     } catch (error) {
       console.error('Failed to fetch heatmap data:', error);
@@ -163,8 +290,185 @@ export default function MonthlyHeatmap() {
     }
   };
 
+  // Connect to public WebSocket
+  const connectWebSocket = () => {
+    try {
+      setConnectionStatus('connecting');
+      
+      const ws = new WebSocket(BYBIT_WS.linear);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('Public WebSocket connected');
+        setConnectionStatus('connected');
+        setReconnectAttempts(0);
+        setError(null);
+        
+        ws.send(JSON.stringify({
+          op: 'subscribe',
+          args: ['tickers.BTCUSDT']
+        }));
+        
+        startHeartbeat();
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.topic === 'tickers') {
+            // Update data on price changes
+            fetchData();
+          } else if (data.op === 'pong') {
+            // Heartbeat response - ignore
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      ws.onerror = (event) => {
+        console.warn('Public WebSocket error:', event);
+        setConnectionStatus('disconnected');
+      };
+
+      ws.onclose = (event) => {
+        console.log('Public WebSocket disconnected:', event.code);
+        setConnectionStatus('disconnected');
+        stopHeartbeat();
+        
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        
+        if (event.code !== 1000) {
+          const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            setReconnectAttempts(prev => prev + 1);
+            connectWebSocket();
+          }, delay);
+        }
+      };
+    } catch (err) {
+      console.error('Failed to connect public WebSocket:', err);
+      setConnectionStatus('disconnected');
+    }
+  };
+
+  // Connect to private WebSocket for Unified Account
+  const connectPrivateWebSocket = () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, '');
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated');
+            setConnectionStatus('authenticated');
+            
+            // Subscribe to wallet updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['wallet'],
+            }));
+          }
+          
+          // Handle wallet updates
+          if (data.topic === 'wallet' && data.data) {
+            fetchData();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error:', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected');
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket:', err);
+    }
+  };
+
+  const startHeartbeat = () => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+    }
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ op: 'ping' }));
+      }
+    }, 30000);
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+  };
+
+  const disconnectWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, 'Normal closure');
+      wsRef.current = null;
+    }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    stopHeartbeat();
+  };
+
   useEffect(() => {
     fetchData();
+    connectWebSocket();
+    connectPrivateWebSocket();
+    
+    const interval = setInterval(() => {
+      if (connectionStatus === 'disconnected') {
+        fetchData();
+      }
+    }, 60000);
+    
+    return () => {
+      clearInterval(interval);
+      disconnectWebSocket();
+    };
   }, []);
 
   if (isLoading) {
@@ -213,8 +517,27 @@ export default function MonthlyHeatmap() {
           <h3 className="text-sm font-semibold text-foreground">
             Monthly P&L Heatmap
           </h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
+          <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
             {monthName} · Based on BTC daily price action
+            <span className="flex items-center gap-1 text-[10px]">
+              {connectionStatus === 'authenticated' ? (
+                <span className="text-green-500">●</span>
+              ) : connectionStatus === 'connected' ? (
+                <span className="text-blue-500">●</span>
+              ) : connectionStatus === 'connecting' ? (
+                <Loader2 size={10} className="animate-spin text-yellow-500" />
+              ) : (
+                <span className="text-red-500">●</span>
+              )}
+              {connectionStatus === 'authenticated' ? 'Live' :
+               connectionStatus === 'connected' ? 'Connected' :
+               connectionStatus === 'connecting' ? 'Connecting...' : 'Offline'}
+            </span>
+            {accountInfo && (
+              <span className="text-[10px] text-muted-foreground">
+                · {accountInfo.accountType} Account
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-4 text-xs">
@@ -331,6 +654,9 @@ export default function MonthlyHeatmap() {
       <div className="mt-2 text-[9px] text-muted-foreground">
         <span className="text-muted-foreground">Data source:</span> Bybit BTCUSDT daily klines · 
         <span className="ml-1">P&L based on daily price action</span>
+        {accountInfo && (
+          <span className="ml-1">· {accountInfo.accountType} Account</span>
+        )}
       </div>
     </div>
   );

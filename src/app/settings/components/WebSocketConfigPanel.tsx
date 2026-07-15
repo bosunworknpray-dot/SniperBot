@@ -2,7 +2,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Radio, ToggleLeft, ToggleRight, Wifi, RefreshCw, AlertCircle } from 'lucide-react';
+import { Radio, ToggleLeft, ToggleRight, Wifi, RefreshCw, AlertCircle, Key } from 'lucide-react';
 
 interface WsChannel {
   id: string;
@@ -11,19 +11,37 @@ interface WsChannel {
   topic: string;
   required: boolean;
   enabled: boolean;
+  category?: 'public' | 'private';
 }
 
-const DEFAULT_CHANNELS: WsChannel[] = [
-  { id: 'kline_5m', label: 'Kline 5m', description: 'OHLCV candles — primary signal timeframe', topic: 'kline.5', required: true, enabled: true },
-  { id: 'kline_15m', label: 'Kline 15m', description: 'OHLCV candles — trend confirmation', topic: 'kline.15', required: true, enabled: true },
-  { id: 'orderbook', label: 'Order Book (L2)', description: 'Depth 50 — liquidity confirmation', topic: 'orderbook.50', required: false, enabled: true },
-  { id: 'trades', label: 'Public Trades', description: 'Real-time trade stream for volume spikes', topic: 'publicTrade', required: false, enabled: true },
-  { id: 'ticker', label: 'Ticker', description: '24h stats, mark price, funding rate', topic: 'tickers', required: false, enabled: false },
-  { id: 'liquidation', label: 'Liquidations', description: 'Forced liquidation events for regime detection', topic: 'allLiquidation', required: false, enabled: false },
+// Public channels (no authentication required)
+const PUBLIC_CHANNELS: WsChannel[] = [
+  { id: 'kline_5m', label: 'Kline 5m', description: 'OHLCV candles — primary signal timeframe', topic: 'kline.5', required: true, enabled: true, category: 'public' },
+  { id: 'kline_15m', label: 'Kline 15m', description: 'OHLCV candles — trend confirmation', topic: 'kline.15', required: true, enabled: true, category: 'public' },
+  { id: 'orderbook', label: 'Order Book (L2)', description: 'Depth 50 — liquidity confirmation', topic: 'orderbook.50', required: false, enabled: true, category: 'public' },
+  { id: 'trades', label: 'Public Trades', description: 'Real-time trade stream for volume spikes', topic: 'publicTrade', required: false, enabled: true, category: 'public' },
+  { id: 'ticker', label: 'Ticker', description: '24h stats, mark price, funding rate', topic: 'tickers', required: false, enabled: false, category: 'public' },
+  { id: 'liquidation', label: 'Liquidations', description: 'Forced liquidation events for regime detection', topic: 'allLiquidation', required: false, enabled: false, category: 'public' },
+];
+
+// Private channels (require authentication - Unified Trading Account)
+const PRIVATE_CHANNELS: WsChannel[] = [
+  { id: 'position', label: 'Positions', description: 'Real-time position updates for Unified Account', topic: 'position', required: false, enabled: false, category: 'private' },
+  { id: 'execution', label: 'Order Execution', description: 'Order fill and execution reports', topic: 'execution', required: false, enabled: false, category: 'private' },
+  { id: 'order', label: 'Orders', description: 'Order status and updates', topic: 'order', required: false, enabled: false, category: 'private' },
+  { id: 'wallet', label: 'Wallet Balance', description: 'Unified Account balance updates', topic: 'wallet', required: false, enabled: false, category: 'private' },
+  { id: 'stop_order', label: 'Stop Orders', description: 'Stop order status updates', topic: 'stopOrder', required: false, enabled: false, category: 'private' },
 ];
 
 const RECONNECT_OPTIONS = ['1s', '3s', '5s', '10s'];
 const PING_OPTIONS = ['10s', '20s', '30s'];
+
+// Generate Bybit signature for WebSocket authentication
+const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiKey + recvWindow;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
 
 class WSConnection {
   private ws: WebSocket | null = null;
@@ -31,10 +49,15 @@ class WSConnection {
   private reconnectDelay: number;
   private pingInterval: number;
   private isConnected = false;
+  private isAuthenticated = false;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private pingTimeout: NodeJS.Timeout | null = null;
   private onMessageCallback: ((data: any) => void) | null = null;
-  private onStatusCallback: ((status: 'connected' | 'disconnected' | 'reconnecting' | 'error') => void) | null = null;
+  private onStatusCallback: ((status: 'connected' | 'disconnected' | 'reconnecting' | 'error' | 'authenticated') => void) | null = null;
+  private privateTopics: string[] = [];
+  private publicTopics: string[] = [];
+  private apiKey: string = '';
+  private apiSecret: string = '';
 
   constructor(url: string, reconnectDelay: number, pingInterval: number) {
     this.url = url;
@@ -42,7 +65,20 @@ class WSConnection {
     this.pingInterval = pingInterval;
   }
 
-  connect() {
+  setCredentials(apiKey: string, apiSecret: string) {
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
+  }
+
+  connect(topics: string[] = []) {
+    // Split topics into public and private
+    this.publicTopics = topics.filter(t => 
+      ['kline', 'orderbook', 'publicTrade', 'tickers', 'allLiquidation'].some(prefix => t.includes(prefix) || t === prefix)
+    );
+    this.privateTopics = topics.filter(t => 
+      ['position', 'execution', 'order', 'wallet', 'stopOrder'].includes(t)
+    );
+
     try {
       this.ws = new WebSocket(this.url);
       this.setupEventHandlers();
@@ -58,12 +94,26 @@ class WSConnection {
     this.ws.onopen = () => {
       this.isConnected = true;
       this.onStatusCallback?.('connected');
-      this.startPingInterval();
       console.log('WebSocket connected');
+      
+      // Subscribe to public topics immediately
+      if (this.publicTopics.length > 0) {
+        this.subscribe(this.publicTopics);
+      }
+
+      // If there are private topics, authenticate first
+      if (this.privateTopics.length > 0 && this.apiKey && this.apiSecret) {
+        this.authenticate();
+      } else if (this.privateTopics.length > 0) {
+        console.warn('Private topics require API credentials. Please set API key and secret.');
+      }
+
+      this.startPingInterval();
     };
 
     this.ws.onclose = () => {
       this.isConnected = false;
+      this.isAuthenticated = false;
       this.onStatusCallback?.('disconnected');
       this.clearPingInterval();
       this.handleReconnect();
@@ -78,11 +128,41 @@ class WSConnection {
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        
+        // Handle authentication response
+        if (data.op === 'auth' && data.retCode === 0) {
+          this.isAuthenticated = true;
+          this.onStatusCallback?.('authenticated');
+          console.log('WebSocket authenticated');
+          
+          // Subscribe to private topics after authentication
+          if (this.privateTopics.length > 0) {
+            this.subscribe(this.privateTopics);
+          }
+        }
+        
         this.onMessageCallback?.(data);
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
       }
     };
+  }
+
+  private authenticate() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const expires = Date.now() + 10000;
+    const timestamp = expires.toString();
+    const recvWindow = '5000';
+    const signature = generateWsSignature(this.apiKey, this.apiSecret, timestamp, recvWindow);
+
+    const authMessage = {
+      op: 'auth',
+      args: [this.apiKey, expires, signature, recvWindow],
+    };
+
+    this.ws.send(JSON.stringify(authMessage));
+    console.log('Authentication request sent');
   }
 
   private handleReconnect() {
@@ -91,7 +171,8 @@ class WSConnection {
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
       this.onStatusCallback?.('reconnecting');
-      this.connect();
+      const allTopics = [...this.publicTopics, ...this.privateTopics];
+      this.connect(allTopics);
     }, this.reconnectDelay);
   }
 
@@ -118,6 +199,7 @@ class WSConnection {
         args: topics,
       };
       this.ws.send(JSON.stringify(message));
+      console.log(`Subscribed to: ${topics.join(', ')}`);
     }
   }
 
@@ -135,7 +217,7 @@ class WSConnection {
     this.onMessageCallback = callback;
   }
 
-  onStatus(callback: (status: 'connected' | 'disconnected' | 'reconnecting' | 'error') => void) {
+  onStatus(callback: (status: 'connected' | 'disconnected' | 'reconnecting' | 'error' | 'authenticated') => void) {
     this.onStatusCallback = callback;
   }
 
@@ -150,18 +232,22 @@ class WSConnection {
       this.ws = null;
     }
     this.isConnected = false;
+    this.isAuthenticated = false;
   }
 }
 
 export default function WebSocketConfigPanel() {
-  const [channels, setChannels] = useState<WsChannel[]>(DEFAULT_CHANNELS);
+  const [channels, setChannels] = useState<WsChannel[]>([...PUBLIC_CHANNELS, ...PRIVATE_CHANNELS]);
   const [reconnectDelay, setReconnectDelay] = useState('3s');
   const [pingInterval, setPingInterval] = useState('20s');
   const [maxRetries, setMaxRetries] = useState('5');
   const [saved, setSaved] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connected' | 'reconnecting' | 'error'>('disconnected');
+  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connected' | 'reconnecting' | 'error' | 'authenticated'>('disconnected');
   const [testMode, setTestMode] = useState<'paper' | 'live'>('paper');
   const [receivedMessages, setReceivedMessages] = useState<number>(0);
+  const [useAuth, setUseAuth] = useState<boolean>(false);
+  const [apiKey, setApiKey] = useState<string>('');
+  const [apiSecret, setApiSecret] = useState<string>('');
   
   const wsConnectionRef = useRef<WSConnection | null>(null);
 
@@ -172,11 +258,21 @@ export default function WebSocketConfigPanel() {
     return value;
   };
 
+  const getWsUrl = () => {
+    // Bybit V5 WebSocket URLs
+    if (testMode === 'paper') {
+      return useAuth 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream-testnet.bybit.com/v5/public/linear';
+    } else {
+      return useAuth
+        ? 'wss://stream.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/public/linear';
+    }
+  };
+
   const connectWebSocket = () => {
-    const wsUrl = testMode === 'paper' 
-      ? 'wss://stream-testnet.bybit.com/v5/public/linear'
-      : 'wss://stream.bybit.com/v5/public/linear';
-    
+    const wsUrl = getWsUrl();
     const reconnectMs = parseTimeToMs(reconnectDelay);
     const pingMs = parseTimeToMs(pingInterval);
     
@@ -186,6 +282,11 @@ export default function WebSocketConfigPanel() {
     
     const connection = new WSConnection(wsUrl, reconnectMs, pingMs);
     wsConnectionRef.current = connection;
+
+    // Set credentials if authentication is enabled
+    if (useAuth && apiKey && apiSecret) {
+      connection.setCredentials(apiKey, apiSecret);
+    }
     
     connection.onStatus((status) => {
       setConnectionStatus(status);
@@ -193,12 +294,23 @@ export default function WebSocketConfigPanel() {
     
     connection.onMessage((data) => {
       setReceivedMessages(prev => prev + 1);
+      
+      // Handle authentication response
+      if (data.op === 'auth') {
+        if (data.retCode === 0) {
+          console.log('Authentication successful');
+        } else {
+          console.error('Authentication failed:', data.retMsg);
+        }
+      }
+      
       if (data.topic) {
         console.log(`Received ${data.topic} data:`, data.data);
       }
     });
     
-    connection.connect();
+    const activeTopics = channels.filter(c => c.enabled).map(c => c.topic);
+    connection.connect(activeTopics);
   };
 
   const disconnectWebSocket = () => {
@@ -210,7 +322,7 @@ export default function WebSocketConfigPanel() {
   };
 
   const testConnection = () => {
-    if (connectionStatus === 'connected' || connectionStatus === 'reconnecting') {
+    if (connectionStatus === 'connected' || connectionStatus === 'reconnecting' || connectionStatus === 'authenticated') {
       disconnectWebSocket();
       setTimeout(() => connectWebSocket(), 500);
     } else {
@@ -229,7 +341,7 @@ export default function WebSocketConfigPanel() {
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
     
-    if (wsConnectionRef.current && connectionStatus === 'connected') {
+    if (wsConnectionRef.current && (connectionStatus === 'connected' || connectionStatus === 'authenticated')) {
       const activeTopics = channels.filter(c => c.enabled).map(c => c.topic);
       wsConnectionRef.current.subscribe(activeTopics);
     }
@@ -246,6 +358,24 @@ export default function WebSocketConfigPanel() {
     };
   }, []);
 
+  // Load API credentials from localStorage or environment
+  useEffect(() => {
+    const savedCreds = localStorage.getItem('bybit_credentials');
+    if (savedCreds) {
+      try {
+        const parsed = JSON.parse(savedCreds);
+        setApiKey(parsed.apiKey || '');
+        setApiSecret(parsed.apiSecret || '');
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+  }, []);
+
+  // Separate channels by category
+  const publicChannels = channels.filter(c => c.category === 'public');
+  const privateChannels = channels.filter(c => c.category === 'private');
+
   return (
     <div className="bg-card border border-border rounded-xl p-6">
       <div className="flex items-center gap-3 mb-5">
@@ -254,10 +384,10 @@ export default function WebSocketConfigPanel() {
         </div>
         <div>
           <h2 className="text-foreground font-semibold text-sm">WebSocket Subscriptions</h2>
-          <p className="text-muted-foreground text-xs mt-0.5">Configure live data channels and reconnection behavior</p>
+          <p className="text-muted-foreground text-xs mt-0.5">Configure live data channels for Unified Trading Account</p>
         </div>
         <div className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-muted text-xs font-mono text-muted-foreground">
-          <Wifi size={11} className={connectionStatus === 'connected' ? 'text-positive' : 'text-muted-foreground'} />
+          <Wifi size={11} className={connectionStatus === 'connected' || connectionStatus === 'authenticated' ? 'text-positive' : 'text-muted-foreground'} />
           {enabledCount} active
         </div>
       </div>
@@ -266,25 +396,29 @@ export default function WebSocketConfigPanel() {
       <div className="flex items-center gap-3 mb-4 p-3 rounded-lg bg-muted/50 border border-border">
         <div className="flex items-center gap-2 flex-1">
           <div className={`w-2 h-2 rounded-full ${
-            connectionStatus === 'connected' ? 'bg-positive' :
+            connectionStatus === 'connected' || connectionStatus === 'authenticated' ? 'bg-positive' :
             connectionStatus === 'reconnecting' ? 'bg-warning' :
             connectionStatus === 'error' ? 'bg-negative' : 'bg-muted-foreground'
           }`} />
           <span className="text-xs font-medium text-foreground">
-            {connectionStatus === 'connected' ? 'Connected' :
+            {connectionStatus === 'authenticated' ? 'Authenticated' :
+             connectionStatus === 'connected' ? 'Connected' :
              connectionStatus === 'reconnecting' ? 'Reconnecting...' :
              connectionStatus === 'error' ? 'Error' : 'Disconnected'}
           </span>
           <span className="text-[10px] text-muted-foreground ml-2">
             {testMode === 'paper' ? 'Testnet' : 'Mainnet'}
           </span>
-          {connectionStatus === 'connected' && (
+          {connectionStatus === 'authenticated' && (
+            <span className="text-[10px] text-positive ml-2">🔐 Private streams active</span>
+          )}
+          {(connectionStatus === 'connected' || connectionStatus === 'authenticated') && (
             <span className="text-[10px] text-muted-foreground ml-2">
               Messages: {receivedMessages}
             </span>
           )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <select
             value={testMode}
             onChange={(e) => setTestMode(e.target.value as 'paper' | 'live')}
@@ -296,55 +430,130 @@ export default function WebSocketConfigPanel() {
           <button
             onClick={testConnection}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              connectionStatus === 'connected' 
+              connectionStatus === 'connected' || connectionStatus === 'authenticated'
                 ? 'bg-negative text-white hover:bg-negative/90' 
                 : 'bg-primary text-white hover:bg-primary/90'
             }`}
           >
-            {connectionStatus === 'connected' ? 'Disconnect' : 'Test Connection'}
+            {connectionStatus === 'connected' || connectionStatus === 'authenticated' ? 'Disconnect' : 'Test Connection'}
           </button>
         </div>
       </div>
 
-      {/* Channel list */}
-      <div className="space-y-2 mb-5">
-        {channels.map((ch) => (
-          <div
-            key={ch.id}
-            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors ${
-              ch.enabled ? 'bg-background border-border' : 'bg-muted/30 border-border/50'
-            }`}
-          >
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <p className={`text-xs font-semibold ${ch.enabled ? 'text-foreground' : 'text-muted-foreground'}`}>
-                  {ch.label}
-                </p>
-                {ch.required && (
-                  <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
-                    REQUIRED
-                  </span>
-                )}
-                <span className="text-[9px] font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                  {ch.topic}
-                </span>
-              </div>
-              <p className="text-[11px] text-muted-foreground mt-0.5">{ch.description}</p>
-            </div>
-            <button
-              onClick={() => toggleChannel(ch.id)}
-              disabled={ch.required}
-              className={`shrink-0 transition-colors ${ch.required ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-            >
-              {ch.enabled ? (
-                <ToggleRight size={22} className="text-primary" />
-              ) : (
-                <ToggleLeft size={22} className="text-muted-foreground" />
-              )}
-            </button>
+      {/* Private Channel Authentication Toggle */}
+      <div className="mb-4 p-3 rounded-lg bg-muted/30 border border-border">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Key size={14} className="text-muted-foreground" />
+            <span className="text-xs font-medium text-foreground">Enable Private Streams</span>
+            <span className="text-[10px] text-muted-foreground">(Position, Orders, Wallet)</span>
           </div>
-        ))}
+          <button
+            onClick={() => setUseAuth(!useAuth)}
+            className="shrink-0 transition-colors"
+          >
+            {useAuth ? (
+              <ToggleRight size={22} className="text-primary" />
+            ) : (
+              <ToggleLeft size={22} className="text-muted-foreground" />
+            )}
+          </button>
+        </div>
+        {useAuth && (!apiKey || !apiSecret) && (
+          <div className="mt-2 p-2 rounded-lg bg-warning-subtle border border-warning/20 text-[10px] text-warning flex items-center gap-2">
+            <AlertCircle size={12} />
+            API credentials required for private streams. Please configure in Settings.
+          </div>
+        )}
       </div>
+
+      {/* Public Channels */}
+      <div className="mb-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Public Channels</p>
+        <div className="space-y-2">
+          {publicChannels.map((ch) => (
+            <div
+              key={ch.id}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors ${
+                ch.enabled ? 'bg-background border-border' : 'bg-muted/30 border-border/50'
+              }`}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className={`text-xs font-semibold ${ch.enabled ? 'text-foreground' : 'text-muted-foreground'}`}>
+                    {ch.label}
+                  </p>
+                  {ch.required && (
+                    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                      REQUIRED
+                    </span>
+                  )}
+                  <span className="text-[9px] font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                    {ch.topic}
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-0.5">{ch.description}</p>
+              </div>
+              <button
+                onClick={() => toggleChannel(ch.id)}
+                disabled={ch.required}
+                className={`shrink-0 transition-colors ${ch.required ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+              >
+                {ch.enabled ? (
+                  <ToggleRight size={22} className="text-primary" />
+                ) : (
+                  <ToggleLeft size={22} className="text-muted-foreground" />
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Private Channels */}
+      {useAuth && (
+        <div className="mb-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Private Channels (Unified Account)</p>
+          <div className="space-y-2">
+            {privateChannels.map((ch) => (
+              <div
+                key={ch.id}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors ${
+                  ch.enabled ? 'bg-background border-border' : 'bg-muted/30 border-border/50'
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className={`text-xs font-semibold ${ch.enabled ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      {ch.label}
+                    </p>
+                    <span className="text-[9px] font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                      {ch.topic}
+                    </span>
+                    {!apiKey || !apiSecret ? (
+                      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-warning-subtle text-warning border border-warning/20">
+                        NO CREDENTIALS
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">{ch.description}</p>
+                </div>
+                <button
+                  onClick={() => toggleChannel(ch.id)}
+                  disabled={!apiKey || !apiSecret}
+                  className={`shrink-0 transition-colors ${(!apiKey || !apiSecret) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                >
+                  {ch.enabled ? (
+                    <ToggleRight size={22} className="text-primary" />
+                  ) : (
+                    <ToggleLeft size={22} className="text-muted-foreground" />
+                  )}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Reconnection settings */}
       <div className="border-t border-border pt-4">
@@ -396,10 +605,13 @@ export default function WebSocketConfigPanel() {
         {saved ? '✓ Config Saved' : 'Save WebSocket Config'}
       </button>
 
-      {connectionStatus === 'connected' && (
+      {(connectionStatus === 'connected' || connectionStatus === 'authenticated') && (
         <div className="mt-3 p-2 rounded-lg bg-positive-subtle border border-positive/20 text-[10px] text-positive flex items-center gap-2">
           <AlertCircle size={12} />
           Active subscriptions: {activeTopics.join(', ')}
+          {connectionStatus === 'authenticated' && (
+            <span className="ml-1 text-[10px] font-medium text-positive">🔐 Private streams active</span>
+          )}
         </div>
       )}
     </div>

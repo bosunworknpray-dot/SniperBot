@@ -1,7 +1,7 @@
 // BotControlPanel.tsx
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Power,
   AlertTriangle,
@@ -12,15 +12,47 @@ import {
   Wifi,
   Database,
   Loader2,
+  Key,
+  Shield,
 } from 'lucide-react';
 import ConfirmModal from '@/components/ui/ConfirmModal';
 import { toast } from 'sonner';
 
 interface SystemStatus {
-  websocket: { status: 'connected' | 'disconnected' | 'connecting'; latency: number };
+  websocket: { status: 'connected' | 'disconnected' | 'connecting' | 'authenticated'; latency: number };
   signalEngine: { status: 'running' | 'paused' | 'idle'; lastRun: string };
   mlModel: { version: string; lastRetrain: string; accuracy: number };
+  account: { type: string; uid: string; connected: boolean };
 }
+
+interface Position {
+  id: string;
+  symbol: string;
+  side: 'long' | 'short';
+  size: number;
+  entryPrice: number;
+  currentPrice: number;
+  unrealizedPnl: number;
+}
+
+// Bybit API endpoints
+const BYBIT_API = {
+  positions: 'https://api.bybit.com/v5/position/list',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
+  marketTime: 'https://api.bybit.com/v5/market/time',
+};
+
+const BYBIT_WS = {
+  public: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
+};
+
+// Helper to generate Bybit signature
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiKey + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
 
 export default function BotControlPanel() {
   const [botActive, setBotActive] = useState(true);
@@ -30,32 +62,351 @@ export default function BotControlPanel() {
   const [toggleModal, setToggleModal] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [paperDay, setPaperDay] = useState(3);
+  const [lastScan, setLastScan] = useState('23:47:31');
+  const [nextScan, setNextScan] = useState('8m');
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [isExecuting, setIsExecuting] = useState(false);
+
+  // WebSocket refs
+  const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
   const [systemStatus, setSystemStatus] = useState<SystemStatus>({
     websocket: { status: 'connecting', latency: 0 },
     signalEngine: { status: 'idle', lastRun: '-' },
     mlModel: { version: 'v12', lastRetrain: '-', accuracy: 0 },
+    account: { type: 'Unified', uid: 'N/A', connected: false },
   });
-  const [paperDay, setPaperDay] = useState(3);
-  const [lastScan, setLastScan] = useState('23:47:31');
-  const [nextScan, setNextScan] = useState('8m');
+
+  // Get API credentials
+  const getApiCredentials = () => {
+    return {
+      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+      isTestnet: true,
+    };
+  };
+
+  // Generate WebSocket authentication signature
+  const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+    const crypto = require('crypto');
+    const paramStr = timestamp + apiKey + recvWindow;
+    return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async () => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) return;
+
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+      
+      const data = await response.json();
+      
+      if (data && data.retCode === 0 && data.result) {
+        const result = data.result;
+        setSystemStatus(prev => ({
+          ...prev,
+          account: {
+            type: result.accountType || result.accType || 'Unified',
+            uid: result.uid || result.accountUid || 'N/A',
+            connected: true,
+          },
+        }));
+      }
+    } catch (err) {
+      console.error('Error fetching account info:', err);
+    }
+  };
+
+  // Fetch positions
+  const fetchPositions = async () => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) return;
+
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/position/list`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+      
+      const data = await response.json();
+      
+      if (data && data.retCode === 0 && data.result?.list) {
+        const newPositions: Position[] = [];
+        data.result.list.forEach((pos: any) => {
+          const size = parseFloat(pos.size);
+          if (size !== 0) {
+            newPositions.push({
+              id: `pos-${pos.symbol}-${pos.positionIdx}`,
+              symbol: pos.symbol,
+              side: pos.side === 'Buy' ? 'long' : 'short',
+              size: Math.abs(size),
+              entryPrice: parseFloat(pos.avgPrice),
+              currentPrice: parseFloat(pos.markPrice),
+              unrealizedPnl: parseFloat(pos.unrealisedPnl || 0),
+            });
+          }
+        });
+        setPositions(newPositions);
+      }
+    } catch (err) {
+      console.error('Error fetching positions:', err);
+    }
+  };
+
+  // Connect to public WebSocket
+  const connectWebSocket = () => {
+    try {
+      setSystemStatus(prev => ({
+        ...prev,
+        websocket: { ...prev.websocket, status: 'connecting' },
+      }));
+      
+      const ws = new WebSocket(BYBIT_WS.public);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('Public WebSocket connected');
+        setSystemStatus(prev => ({
+          ...prev,
+          websocket: { ...prev.websocket, status: 'connected', latency: 0 },
+        }));
+        
+        // Subscribe to tickers
+        ws.send(JSON.stringify({
+          op: 'subscribe',
+          args: ['tickers.BTCUSDT', 'tickers.ETHUSDT', 'tickers.SOLUSDT'],
+        }));
+        
+        startHeartbeat();
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.topic === 'tickers') {
+            // Update last scan time
+            setLastScan(new Date().toLocaleTimeString());
+          } else if (data.op === 'pong') {
+            // Update latency
+            setSystemStatus(prev => ({
+              ...prev,
+              websocket: { ...prev.websocket, latency: 0 },
+            }));
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.warn('Public WebSocket error:', error);
+        setSystemStatus(prev => ({
+          ...prev,
+          websocket: { ...prev.websocket, status: 'disconnected' },
+        }));
+      };
+
+      ws.onclose = () => {
+        console.log('Public WebSocket disconnected');
+        setSystemStatus(prev => ({
+          ...prev,
+          websocket: { ...prev.websocket, status: 'disconnected' },
+        }));
+        stopHeartbeat();
+        // Attempt to reconnect
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
+      };
+    } catch (err) {
+      console.error('Failed to connect public WebSocket:', err);
+      setSystemStatus(prev => ({
+        ...prev,
+        websocket: { ...prev.websocket, status: 'disconnected' },
+      }));
+    }
+  };
+
+  // Connect to private WebSocket for Unified Account
+  const connectPrivateWebSocket = () => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) {
+        console.log('No API credentials for private WebSocket');
+        return;
+      }
+
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated');
+            setSystemStatus(prev => ({
+              ...prev,
+              websocket: { ...prev.websocket, status: 'authenticated' },
+              account: { ...prev.account, connected: true },
+            }));
+            
+            // Subscribe to position updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['position', 'execution', 'order'],
+            }));
+          }
+          
+          // Handle position updates
+          if (data.topic === 'position' && data.data) {
+            fetchPositions();
+            setSystemStatus(prev => ({
+              ...prev,
+              signalEngine: { ...prev.signalEngine, lastRun: new Date().toLocaleTimeString() },
+            }));
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error:', error);
+        setSystemStatus(prev => ({
+          ...prev,
+          websocket: { ...prev.websocket, status: 'disconnected' },
+        }));
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected');
+        setSystemStatus(prev => ({
+          ...prev,
+          websocket: { ...prev.websocket, status: 'disconnected' },
+        }));
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket:', err);
+    }
+  };
+
+  const startHeartbeat = () => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+    }
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ op: 'ping' }));
+      }
+    }, 30000);
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+  };
+
+  const disconnectWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, 'Normal closure');
+      wsRef.current = null;
+    }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    stopHeartbeat();
+  };
 
   // Fetch system status
   const fetchSystemStatus = async () => {
     try {
-      // Check WebSocket health
+      // Check WebSocket health with public API
       const wsStart = Date.now();
-      const response = await fetch('https://api.bybit.com/v5/market/time');
+      const response = await fetch(BYBIT_API.marketTime);
       const wsLatency = Date.now() - wsStart;
       
       if (response.ok) {
         setSystemStatus(prev => ({
           ...prev,
-          websocket: { status: 'connected', latency: wsLatency },
+          websocket: { 
+            ...prev.websocket, 
+            status: wsRef.current?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
+            latency: wsLatency 
+          },
         }));
       }
 
+      // Fetch account info
+      await fetchAccountInfo();
+      
+      // Fetch positions
+      await fetchPositions();
+
       // In a real app, you'd have endpoints for signal engine and ML model status
-      // For now, we'll simulate with localStorage
       const savedStatus = localStorage.getItem('bot_system_status');
       if (savedStatus) {
         try {
@@ -68,19 +419,34 @@ export default function BotControlPanel() {
         } catch (e) { /* ignore */ }
       }
     } catch (error) {
-      setSystemStatus(prev => ({
-        ...prev,
-        websocket: { status: 'disconnected', latency: 0 },
-      }));
+      console.error('Error fetching system status:', error);
     } finally {
       setIsLoading(false);
     }
   };
 
+  // Initialize
   useEffect(() => {
     fetchSystemStatus();
+    connectWebSocket();
+    connectPrivateWebSocket();
+    
     const interval = setInterval(fetchSystemStatus, 30000);
-    return () => clearInterval(interval);
+    const scanInterval = setInterval(() => {
+      if (botActive) {
+        setNextScan('0s');
+        setLastScan(new Date().toLocaleTimeString());
+        fetchPositions();
+        // Schedule next scan
+        setTimeout(() => setNextScan('5m'), 1000);
+      }
+    }, 300000); // 5 minutes
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(scanInterval);
+      disconnectWebSocket();
+    };
   }, []);
 
   const handleToggleConfirm = () => {
@@ -99,17 +465,61 @@ export default function BotControlPanel() {
     }));
   };
 
-  const handleEmergencyConfirm = () => {
+  const handleEmergencyConfirm = async () => {
     setBotActive(false);
-    toast?.error('Emergency shutdown executed — all positions queued for market close', {
-      duration: 6000,
-    });
-    setEmergencyModal(false);
+    setIsExecuting(true);
     
-    setSystemStatus(prev => ({
-      ...prev,
-      signalEngine: { ...prev.signalEngine, status: 'idle' },
-    }));
+    try {
+      // Close all positions
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (apiKey && apiSecret) {
+        const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+        const timestamp = Date.now().toString();
+        const recvWindow = '5000';
+        
+        for (const position of positions) {
+          const side = position.side === 'long' ? 'Sell' : 'Buy';
+          const params = `category=linear&symbol=${position.symbol}&side=${side}&orderType=Market&qty=${position.size}&timeInForce=GTC`;
+          const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+          
+          await fetch(`${baseUrl}/v5/order/create`, {
+            method: 'POST',
+            headers: {
+              'X-BAPI-API-KEY': apiKey,
+              'X-BAPI-TIMESTAMP': timestamp,
+              'X-BAPI-SIGN': signature,
+              'X-BAPI-RECV-WINDOW': recvWindow,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              category: 'linear',
+              symbol: position.symbol,
+              side: side,
+              orderType: 'Market',
+              qty: position.size.toString(),
+              timeInForce: 'GTC',
+            }),
+          });
+        }
+      }
+      
+      toast?.error('Emergency shutdown executed — all positions closed', {
+        duration: 6000,
+      });
+      setEmergencyModal(false);
+      
+      setSystemStatus(prev => ({
+        ...prev,
+        signalEngine: { ...prev.signalEngine, status: 'idle' },
+      }));
+      
+      // Refresh positions
+      await fetchPositions();
+    } catch (error) {
+      toast?.error('Failed to close all positions');
+    } finally {
+      setIsExecuting(false);
+    }
   };
 
   const handleRestart = async () => {
@@ -117,8 +527,11 @@ export default function BotControlPanel() {
     toast?.info('Restarting signal engine...');
     
     try {
-      // Simulate restart with actual API call
-      await new Promise((r) => setTimeout(r, 1800));
+      // Reconnect WebSockets
+      disconnectWebSocket();
+      await new Promise((r) => setTimeout(r, 500));
+      connectWebSocket();
+      connectPrivateWebSocket();
       
       // Refresh data
       await fetchSystemStatus();
@@ -146,10 +559,11 @@ export default function BotControlPanel() {
 
   const statusItems = [
     { 
-      label: 'Bybit WebSocket', 
-      status: systemStatus.websocket.status === 'connected' ? `Connected (${systemStatus.websocket.latency}ms)` : 
+      label: 'WebSocket', 
+      status: systemStatus.websocket.status === 'authenticated' ? `Authenticated (${systemStatus.websocket.latency}ms)` : 
+              systemStatus.websocket.status === 'connected' ? `Connected (${systemStatus.websocket.latency}ms)` : 
               systemStatus.websocket.status === 'connecting' ? 'Connecting...' : 'Disconnected', 
-      ok: systemStatus.websocket.status === 'connected', 
+      ok: systemStatus.websocket.status === 'connected' || systemStatus.websocket.status === 'authenticated', 
       icon: Wifi 
     },
     { 
@@ -160,12 +574,20 @@ export default function BotControlPanel() {
       icon: Cpu 
     },
     { 
-      label: 'ML Model (XGBoost)', 
+      label: 'Unified Account', 
+      status: systemStatus.account.connected ? `${systemStatus.account.type} (${systemStatus.account.uid})` : 'Not Connected', 
+      ok: systemStatus.account.connected, 
+      icon: Shield 
+    },
+    { 
+      label: 'ML Model', 
       status: `${systemStatus.mlModel.version} · Acc: ${(systemStatus.mlModel.accuracy * 100).toFixed(1)}%`, 
       ok: true, 
       icon: Settings2 
     },
   ];
+
+  const openPositions = positions.length;
 
   return (
     <>
@@ -208,9 +630,14 @@ export default function BotControlPanel() {
               <span className="text-xs font-semibold text-info">
                 PAPER TRADING MODE
               </span>
+              {systemStatus.websocket.status === 'authenticated' && (
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
+                  🔐 Authenticated
+                </span>
+              )}
             </div>
             <span className="text-[10px] text-info/70 font-mono">
-              Day {paperDay} / 14
+              {openPositions} positions · Day {paperDay} / 14
             </span>
           </div>
 
@@ -326,10 +753,11 @@ export default function BotControlPanel() {
 
             <button
               onClick={() => setEmergencyModal(true)}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold text-negative bg-negative-subtle border border-negative/30 hover:bg-negative/20 transition-all duration-150 active:scale-95"
+              disabled={isExecuting}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold text-negative bg-negative-subtle border border-negative/30 hover:bg-negative/20 transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <AlertTriangle size={14} />
-              Emergency Shutdown
+              {isExecuting ? 'Closing positions...' : 'Emergency Shutdown'}
             </button>
           </div>
 
@@ -343,6 +771,7 @@ export default function BotControlPanel() {
           </div>
         </div>
       </div>
+
       <ConfirmModal
         open={toggleModal}
         title={botActive ? 'Pause SniperBot?' : 'Resume SniperBot?'}
@@ -355,10 +784,11 @@ export default function BotControlPanel() {
         onConfirm={handleToggleConfirm}
         onCancel={() => setToggleModal(false)}
       />
+
       <ConfirmModal
         open={emergencyModal}
         title="Emergency Shutdown"
-        description="This will immediately stop the bot AND submit market orders to close ALL open positions. This is irreversible. Daily P&L will be locked at current value. Use only in genuine emergency situations."
+        description={`This will immediately stop the bot AND submit market orders to close ALL ${openPositions} open positions. This is irreversible. Daily P&L will be locked at current value. Use only in genuine emergency situations.`}
         confirmLabel="Execute Emergency Shutdown"
         variant="danger"
         onConfirm={handleEmergencyConfirm}

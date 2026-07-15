@@ -23,6 +23,7 @@ interface Trade {
   positionIdx?: number;
   status: 'open' | 'closed';
   timestamp: number;
+  accountType?: string;
 }
 
 const OUTCOME_ICON = {
@@ -42,7 +43,7 @@ const OUTCOME_COLOR = {
 };
 
 // Helper to format price with 4 decimal places
-const formatPrice = (price: number): string => {
+const formatPriceDisplay = (price: number): string => {
   if (price >= 1000) {
     return price.toFixed(2);
   } else if (price >= 1) {
@@ -52,9 +53,15 @@ const formatPrice = (price: number): string => {
   }
 };
 
-// Helper to format price with 4 decimal places for display
-const formatPriceDisplay = (price: number): string => {
-  return price.toFixed(4);
+// Helper to safely parse JSON response
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
 
 // Bybit API endpoints
@@ -62,18 +69,20 @@ const BYBIT_API = {
   positions: 'https://api.bybit.com/v5/position/list',
   orderHistory: 'https://api.bybit.com/v5/order/history',
   spot: 'https://api.bybit.com/v5/market/tickers',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
 };
 
 const BYBIT_WS = {
   linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
 
 // Helper to generate Bybit signature
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -84,9 +93,11 @@ export default function RecentTradesFeed() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
 
   // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -97,6 +108,43 @@ export default function RecentTradesFeed() {
       apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
       isTestnet: true,
     };
+  };
+
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
+    try {
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+      
+      const data = await safeJsonParse(response);
+      
+      if (data && data.retCode === 0 && data.result) {
+        const result = data.result;
+        setAccountInfo({
+          uid: result.uid || result.accountUid || 'N/A',
+          accountType: result.accountType || result.accType || 'Unified',
+        });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Error fetching account info:', err);
+      return false;
+    }
   };
 
   // Fetch real trades from Bybit
@@ -110,7 +158,7 @@ export default function RecentTradesFeed() {
       // Always fetch market data for symbols
       const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
         fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => r.json())
+          .then(r => safeJsonParse(r))
           .catch(() => null)
       );
       const tickerResults = await Promise.all(tickerPromises);
@@ -128,12 +176,15 @@ export default function RecentTradesFeed() {
       
       // If API keys exist, fetch real positions and orders
       if (apiKey && apiSecret) {
+        // Fetch account info for Unified Account
+        await fetchAccountInfo(apiKey, apiSecret, isTestnet);
+
         const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
         const timestamp = Date.now().toString();
         const recvWindow = '5000';
         const params = '';
         
-        const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
         
         // Fetch positions and order history in parallel
         const [positionsResponse, ordersResponse] = await Promise.all([
@@ -157,11 +208,11 @@ export default function RecentTradesFeed() {
           }),
         ]);
 
-        const positionsData = await positionsResponse.json();
-        const ordersData = await ordersResponse.json();
+        const positionsData = await safeJsonParse(positionsResponse);
+        const ordersData = await safeJsonParse(ordersResponse);
 
         // Process open positions
-        if (positionsData.retCode === 0 && positionsData.result?.list) {
+        if (positionsData && positionsData.retCode === 0 && positionsData.result?.list) {
           positionsData.result.list.forEach((pos: any) => {
             const size = parseFloat(pos.size);
             if (size !== 0) {
@@ -183,20 +234,21 @@ export default function RecentTradesFeed() {
                 holdMins: holdMins,
                 confidence: Math.min(95, 70 + Math.random() * 20),
                 closedAt: 'Open',
-                entryPrice: entryPrice,
-                exitPrice: currentPrice,
+                entryPrice: Math.round(entryPrice * 10000) / 10000,
+                exitPrice: Math.round(currentPrice * 10000) / 10000,
                 size: Math.abs(size),
                 leverage: parseFloat(pos.leverage || 5),
                 positionIdx: parseInt(pos.positionIdx || 0),
                 status: 'open',
                 timestamp: createdTime,
+                accountType: accountInfo?.accountType || 'Unified',
               });
             }
           });
         }
 
         // Process closed trades from order history
-        if (ordersData.retCode === 0 && ordersData.result?.list) {
+        if (ordersData && ordersData.retCode === 0 && ordersData.result?.list) {
           ordersData.result.list.forEach((order: any) => {
             if (order.orderStatus === 'Filled') {
               const side = order.side === 'Buy' ? 'long' : 'short';
@@ -227,13 +279,14 @@ export default function RecentTradesFeed() {
                 holdMins: Math.max(1, holdMins),
                 confidence: 70 + Math.random() * 25,
                 closedAt: new Date(updatedTime).toLocaleTimeString(),
-                entryPrice: entryPrice,
-                exitPrice: entryPrice * (1 + (Math.random() - 0.5) * 0.02),
+                entryPrice: Math.round(entryPrice * 10000) / 10000,
+                exitPrice: Math.round(entryPrice * (1 + (Math.random() - 0.5) * 0.02) * 10000) / 10000,
                 size: size,
                 leverage: parseFloat(order.leverage || 5),
                 orderId: order.orderId,
                 status: 'closed',
                 timestamp: updatedTime,
+                accountType: accountInfo?.accountType || 'Unified',
               });
             }
           });
@@ -294,12 +347,13 @@ export default function RecentTradesFeed() {
         holdMins: Math.floor(Math.random() * 60) + 10,
         confidence: 70 + Math.random() * 25,
         closedAt: time.toLocaleTimeString(),
-        entryPrice: entryPrice,
-        exitPrice: price * (1 + (Math.random() - 0.5) * 0.02),
+        entryPrice: Math.round(entryPrice * 10000) / 10000,
+        exitPrice: Math.round(price * (1 + (Math.random() - 0.5) * 0.02) * 10000) / 10000,
         size: 0.01 + Math.random() * 0.05,
         leverage: 5,
         status: 'closed',
         timestamp: time.getTime(),
+        accountType: 'Demo',
       });
     }
 
@@ -331,26 +385,93 @@ export default function RecentTradesFeed() {
         holdMins: Math.floor(Math.random() * 60) + 10,
         confidence: 70 + Math.random() * 25,
         closedAt: time.toLocaleTimeString(),
-        entryPrice: 50000 + Math.random() * 20000,
-        exitPrice: 50000 + Math.random() * 20000,
+        entryPrice: Math.round((50000 + Math.random() * 20000) * 10000) / 10000,
+        exitPrice: Math.round((50000 + Math.random() * 20000) * 10000) / 10000,
         size: 0.01 + Math.random() * 0.05,
         leverage: 5,
         status: 'closed',
         timestamp: time.getTime(),
+        accountType: 'Demo',
       });
     }
 
     return trades;
   };
 
-  // WebSocket connection for real-time updates
+  // Connect to private WebSocket for real-time trade updates (Unified Account)
+  const connectPrivateWebSocket = async () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, '');
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated');
+            // Subscribe to execution and order updates
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['execution', 'order'],
+            }));
+          }
+          
+          // Handle execution updates (new trades)
+          if (data.topic === 'execution' && data.data) {
+            // Refresh trades when there's a new execution
+            fetchTrades();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error:', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket:', err);
+    }
+  };
+
+  // WebSocket connection for public data
   const connectWebSocket = () => {
     try {
       const ws = new WebSocket(BYBIT_WS.linear);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log('Public WebSocket connected');
         setReconnectAttempts(0);
         ws.send(JSON.stringify({
           op: 'subscribe',
@@ -375,7 +496,7 @@ export default function RecentTradesFeed() {
                   
                   return {
                     ...trade,
-                    exitPrice: price,
+                    exitPrice: Math.round(price * 10000) / 10000,
                     pnl: pnl,
                     pnlPct: pnlPct,
                     holdMins: Math.floor((Date.now() - trade.timestamp) / 60000),
@@ -393,27 +514,23 @@ export default function RecentTradesFeed() {
       };
 
       ws.onerror = (error) => {
-        console.warn('WebSocket error:', error);
-        // Don't set error state here - let onclose handle reconnection
+        console.warn('Public WebSocket error:', error);
       };
 
       ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code);
+        console.log('Public WebSocket disconnected:', event.code);
         stopHeartbeat();
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
-        // Only attempt reconnect if not a normal closure
-        if (event.code !== 1000) {
-          const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
-            connectWebSocket();
-          }, delay);
-        }
+        const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          setReconnectAttempts(prev => prev + 1);
+          connectWebSocket();
+        }, delay);
       };
     } catch (err) {
-      console.error('Failed to connect WebSocket:', err);
+      console.error('Failed to connect public WebSocket:', err);
     }
   };
 
@@ -421,6 +538,10 @@ export default function RecentTradesFeed() {
     if (wsRef.current) {
       wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
+    }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
     }
     stopHeartbeat();
     if (reconnectTimeoutRef.current) {
@@ -450,6 +571,7 @@ export default function RecentTradesFeed() {
   useEffect(() => {
     fetchTrades();
     connectWebSocket();
+    connectPrivateWebSocket();
     
     const interval = setInterval(() => {
       if (!isRefreshing) {
@@ -488,6 +610,11 @@ export default function RecentTradesFeed() {
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-semibold text-foreground">
             Recent Trades
+            {accountInfo && (
+              <span className="ml-2 text-[10px] font-normal text-muted-foreground">
+                {accountInfo.accountType} Account
+              </span>
+            )}
           </h3>
           {isApiConnected && (
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
@@ -509,7 +636,7 @@ export default function RecentTradesFeed() {
               totalPnl >= 0 ? 'text-positive' : 'text-negative'
             }`}
           >
-            {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(1)}
+            {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
           </span>
           <button
             onClick={fetchTrades}
@@ -558,6 +685,11 @@ export default function RecentTradesFeed() {
                 const color = OUTCOME_COLOR[trade.outcome];
                 const isOpen = trade.status === 'open';
                 
+                // Determine the badge variant for StatusBadge
+                // Use 'default' as fallback for 'open' since it's not a valid variant
+                const directionVariant = trade.direction === 'long' ? 'long' : 'short';
+                const outcomeVariant = isOpen ? 'pending' : trade.outcome === 'tp1_hit' || trade.outcome === 'tp2_hit' ? 'confirmed' : 'expired';
+                
                 return (
                   <tr
                     key={trade.id}
@@ -572,7 +704,7 @@ export default function RecentTradesFeed() {
                       {trade.symbol}
                     </td>
                     <td className="px-4 py-2.5">
-                      <StatusBadge variant={trade.direction} size="sm" />
+                      <StatusBadge variant={directionVariant} size="sm" />
                     </td>
                     <td className="px-4 py-2.5">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize ${
@@ -586,7 +718,7 @@ export default function RecentTradesFeed() {
                     <td className="px-4 py-2.5">
                       <div className={`flex items-center gap-1.5 ${color}`}>
                         <Icon size={12} />
-                        <StatusBadge variant={isOpen ? 'open' : trade.outcome} size="sm" />
+                        <StatusBadge variant={outcomeVariant} size="sm" />
                       </div>
                     </td>
                     <td className="px-4 py-2.5">
@@ -595,7 +727,7 @@ export default function RecentTradesFeed() {
                           trade.pnl >= 0 ? 'text-positive' : 'text-negative'
                         }`}
                       >
-                        {trade.pnl >= 0 ? '+' : ''}${Math.abs(trade.pnl).toFixed(1)}
+                        {trade.pnl >= 0 ? '+' : ''}${Math.abs(trade.pnl).toFixed(2)}
                       </span>
                       <span
                         className={`ml-1 text-[10px] font-tabular ${
@@ -603,7 +735,7 @@ export default function RecentTradesFeed() {
                         }`}
                       >
                         ({trade.pnlPct >= 0 ? '+' : ''}
-                        {trade.pnlPct.toFixed(1)}%)
+                        {trade.pnlPct.toFixed(2)}%)
                       </span>
                     </td>
                     <td className="px-4 py-2.5 font-mono text-muted-foreground font-tabular">

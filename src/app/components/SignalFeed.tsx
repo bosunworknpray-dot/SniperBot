@@ -34,12 +34,13 @@ const BYBIT_API = {
 
 const BYBIT_WS = {
   linear: 'wss://stream.bybit.com/v5/public/linear',
+  private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT'];
 
 // Helper to format price with 4 decimal places
-const formatPrice = (price: number): string => {
+const formatPriceDisplay = (price: number): string => {
   if (price >= 1000) {
     return price.toFixed(2);
   } else if (price >= 1) {
@@ -49,9 +50,15 @@ const formatPrice = (price: number): string => {
   }
 };
 
-// Helper to format price with 4 decimal places for display
-const formatPriceDisplay = (price: number): string => {
-  return price.toFixed(4);
+// Helper to safely parse JSON response
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
 
 const CONFIDENCE_COLOR = (c: number) =>
@@ -72,8 +79,25 @@ export default function SignalFeed() {
 
   // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
+  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Get API credentials for private WebSocket
+  const getApiCredentials = () => {
+    return {
+      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+      isTestnet: true,
+    };
+  };
+
+  // Generate Bybit signature for WebSocket authentication
+  const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+    const crypto = require('crypto');
+    const paramStr = timestamp + apiKey + recvWindow;
+    return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+  };
 
   // Generate signal from real market data
   const generateSignalFromData = (symbol: string, ticker: any): Signal | null => {
@@ -129,10 +153,10 @@ export default function SignalFeed() {
         volumeSpike > 1.5 ? 'VWAP+' : 'BB mid',
         `Vol×${volumeSpike.toFixed(1)}`,
       ],
-      entryPrice: entryPrice,
+      entryPrice: Math.round(entryPrice * 10000) / 10000,
       change24h,
       volume,
-      price,
+      price: Math.round(price * 10000) / 10000,
     };
   };
 
@@ -144,7 +168,7 @@ export default function SignalFeed() {
       
       const promises = SUPPORTED_SYMBOLS.map(symbol =>
         fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => r.json())
+          .then(r => safeJsonParse(r))
           .catch(() => null)
       );
       
@@ -176,6 +200,72 @@ export default function SignalFeed() {
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
+    }
+  };
+
+  // Connect to private WebSocket for real-time signal updates
+  const connectPrivateWebSocket = () => {
+    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+    if (!apiKey || !apiSecret) return;
+
+    try {
+      const wsUrl = isTestnet 
+        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
+        : 'wss://stream.bybit.com/v5/private/linear';
+      
+      const privateWs = new WebSocket(wsUrl);
+      privateWsRef.current = privateWs;
+
+      privateWs.onopen = () => {
+        console.log('Private WebSocket connected for signals');
+        
+        // Authenticate
+        const expires = Date.now() + 10000;
+        const timestamp = expires.toString();
+        const recvWindow = '5000';
+        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        
+        privateWs.send(JSON.stringify({
+          op: 'auth',
+          args: [apiKey, expires, signature, recvWindow],
+        }));
+      };
+
+      privateWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle authentication response
+          if (data.op === 'auth' && data.retCode === 0) {
+            console.log('Private WebSocket authenticated for signals');
+            // Subscribe to order updates for signal execution tracking
+            privateWs.send(JSON.stringify({
+              op: 'subscribe',
+              args: ['order', 'execution'],
+            }));
+          }
+          
+          // Handle order updates - refresh signals when orders are executed
+          if (data.topic === 'order' && data.data) {
+            // Refresh signals when there's an order update
+            fetchSignals();
+          }
+        } catch (err) {
+          // Ignore parse errors
+        }
+      };
+
+      privateWs.onerror = (error) => {
+        console.warn('Private WebSocket error (signals):', error);
+      };
+
+      privateWs.onclose = () => {
+        console.log('Private WebSocket disconnected (signals)');
+        // Attempt to reconnect after delay
+        setTimeout(connectPrivateWebSocket, 10000);
+      };
+    } catch (err) {
+      console.error('Failed to connect private WebSocket (signals):', err);
     }
   };
 
@@ -257,6 +347,10 @@ export default function SignalFeed() {
       wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
     }
+    if (privateWsRef.current) {
+      privateWsRef.current.close(1000, 'Normal closure');
+      privateWsRef.current = null;
+    }
     stopHeartbeat();
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -285,6 +379,7 @@ export default function SignalFeed() {
   useEffect(() => {
     fetchSignals();
     connectWebSocket();
+    connectPrivateWebSocket();
     
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
