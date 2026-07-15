@@ -10,25 +10,31 @@ import {
   ResponsiveContainer,
   CartesianGrid,
   ReferenceLine,
+  Loader2,
+  AlertCircle,
 } from 'recharts';
-import { Loader2, Wifi, WifiOff } from 'lucide-react';
+import { Wifi, WifiOff } from 'lucide-react';
 
 interface EquityPoint {
-  time: string;
+  date: string;
   equity: number;
-  pnl: number;
+  drawdown: number;
 }
 
-interface EquitySparklineProps {
-  mode?: 'paper' | 'live';
-  baseEquity?: number;
+interface EquityStats {
+  startEquity: number;
+  currentEquity: number;
+  totalReturn: number;
+  maxDrawdown: number;
+  peakEquity: number;
 }
 
 // Bybit API endpoints
 const BYBIT_API = {
+  kline: 'https://api.bybit.com/v5/market/kline',
   spot: 'https://api.bybit.com/v5/market/tickers',
+  accountInfo: 'https://api.bybit.com/v5/account/info',
   wallet: 'https://api.bybit.com/v5/account/wallet-balance',
-  positions: 'https://api.bybit.com/v5/position/list',
 };
 
 const BYBIT_WS = {
@@ -36,7 +42,18 @@ const BYBIT_WS = {
   private: 'wss://stream.bybit.com/v5/private/linear',
 };
 
-const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+const BASE_EQUITY = 100000; // Base equity for simulation
+
+// Helper to safely parse JSON
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
 
 // Helper to generate Bybit signature
 const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
@@ -45,38 +62,43 @@ const generateSignature = (apiKey: string, apiSecret: string, timestamp: string,
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
-// Helper to generate WebSocket authentication signature
-const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
-  const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow;
-  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
-};
-
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
+  const pnl = d.equity - BASE_EQUITY;
   return (
-    <div className="card-surface p-3 shadow-xl text-xs font-mono min-w-[140px]">
-      <p className="text-muted-foreground mb-1.5">{label}</p>
-      <p className="text-foreground font-semibold">
-        Equity:{' '}
-        <span className="text-primary">${d.equity.toLocaleString()}</span>
+    <div className="card-surface p-3 shadow-xl text-xs font-mono min-w-[160px]">
+      <p className="text-muted-foreground mb-2 font-sans">{label}</p>
+      <p className="text-foreground">
+        Equity: <span className="text-primary">${d.equity.toLocaleString()}</span>
       </p>
-      <p className={d.pnl >= 0 ? 'text-positive' : 'text-negative'}>
-        P&L: {d.pnl >= 0 ? '+' : ''}${d.pnl.toFixed(2)}
+      <p className={pnl >= 0 ? 'text-positive' : 'text-negative'}>
+        Net P&L: {pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}
       </p>
+      {d.drawdown < 0 && (
+        <p className="text-negative">DD: {d.drawdown.toFixed(2)}%</p>
+      )}
     </div>
   );
 };
 
-export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 }: EquitySparklineProps) {
+export default function EquityCurveChartInner() {
   const [data, setData] = useState<EquityPoint[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [stats, setStats] = useState({ pnl: 0, return: 0, startEquity: 0, currentEquity: 0 });
+  const [error, setError] = useState<string | null>(null);
+  const [showDrawdown, setShowDrawdown] = useState(false);
+  const [stats, setStats] = useState<EquityStats>({
+    startEquity: BASE_EQUITY,
+    currentEquity: BASE_EQUITY,
+    totalReturn: 0,
+    maxDrawdown: 0,
+    peakEquity: BASE_EQUITY,
+  });
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting' | 'authenticated'>('connecting');
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const [liveBalance, setLiveBalance] = useState<number>(baseEquity);
-  const [positionsPnl, setPositionsPnl] = useState<number>(0);
+  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
+  const [liveBalance, setLiveBalance] = useState<number>(BASE_EQUITY);
+  const [isLiveMode, setIsLiveMode] = useState(false);
 
   // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
@@ -93,11 +115,48 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
     };
   };
 
-  // Fetch real balance from Bybit
-  const fetchBalance = async (): Promise<number> => {
+  // Fetch account info for Unified Account
+  const fetchAccountInfo = async () => {
     try {
       const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      if (!apiKey || !apiSecret || mode !== 'live') return baseEquity;
+      if (!apiKey || !apiSecret) return;
+
+      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+      const timestamp = Date.now().toString();
+      const recvWindow = '5000';
+      const params = '';
+      
+      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
+      
+      const response = await fetch(`${baseUrl}/v5/account/info`, {
+        method: 'GET',
+        headers: {
+          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-TIMESTAMP': timestamp,
+          'X-BAPI-SIGN': signature,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+        },
+      });
+
+      const result = await safeJsonParse(response);
+      
+      if (result && result.retCode === 0 && result.result) {
+        const account = result.result;
+        setAccountInfo({
+          uid: account.uid || account.accountUid || 'N/A',
+          accountType: account.accountType || account.accType || 'Unified',
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching account info:', error);
+    }
+  };
+
+  // Fetch real balance from Bybit
+  const fetchRealBalance = async (): Promise<number> => {
+    try {
+      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
+      if (!apiKey || !apiSecret) return BASE_EQUITY;
 
       const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
       const timestamp = Date.now().toString();
@@ -116,7 +175,7 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
         },
       });
 
-      const data = await response.json();
+      const data = await safeJsonParse(response);
       
       if (data && data.retCode === 0 && data.result) {
         const wallet = data.result.list?.[0];
@@ -125,164 +184,115 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
           return totalEquity;
         }
       }
-      return baseEquity;
+      return BASE_EQUITY;
     } catch (error) {
       console.error('Error fetching balance:', error);
-      return baseEquity;
+      return BASE_EQUITY;
     }
   };
 
-  // Fetch positions P&L
-  const fetchPositionsPnl = async (): Promise<number> => {
+  const fetchData = async () => {
     try {
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      if (!apiKey || !apiSecret || mode !== 'live') return 0;
+      setIsLoading(true);
+      setError(null);
 
-      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
-      
-      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-      
-      const response = await fetch(`${baseUrl}/v5/position/list`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
+      // Fetch account info
+      await fetchAccountInfo();
 
-      const data = await response.json();
-      let totalPnl = 0;
-      
-      if (data && data.retCode === 0 && data.result?.list) {
-        data.result.list.forEach((pos: any) => {
-          const size = parseFloat(pos.size);
-          if (size !== 0) {
-            totalPnl += parseFloat(pos.unrealisedPnl || 0);
-          }
-        });
+      // Fetch real balance for live mode
+      const realBalance = await fetchRealBalance();
+      if (realBalance > 0 && realBalance !== BASE_EQUITY) {
+        setLiveBalance(realBalance);
+        setIsLiveMode(true);
       }
-      return totalPnl;
-    } catch (error) {
-      console.error('Error fetching positions P&L:', error);
-      return 0;
-    }
-  };
 
-  // Fetch equity data
-  const fetchEquityData = async () => {
-    try {
-      // Fetch real market data from Bybit
-      const response = await fetch(`${BYBIT_API.spot}?category=linear&symbol=BTCUSDT`);
-      const result = await response.json();
+      // Fetch real kline data for BTCUSDT (4h intervals, 30 candles)
+      const response = await fetch(`${BYBIT_API.kline}?category=linear&symbol=BTCUSDT&interval=240&limit=30`);
       
-      let currentBalance = baseEquity;
-      
-      // If live mode, fetch real balance
-      if (mode === 'live') {
-        const balance = await fetchBalance();
-        if (balance > 0) {
-          currentBalance = balance;
-          setLiveBalance(balance);
-        }
-        
-        // Fetch positions P&L
-        const pnl = await fetchPositionsPnl();
-        setPositionsPnl(pnl);
+      if (!response.ok) {
+        throw new Error('Failed to fetch kline data');
       }
       
-      if (result.retCode === 0 && result.result?.list) {
-        const ticker = result.result.list[0];
-        const price = parseFloat(ticker.lastPrice);
-        const change24h = parseFloat(ticker.price24hPcnt) * 100;
-        const volume = parseFloat(ticker.volume24h);
+      const result = await safeJsonParse(response);
+      
+      if (result && result.retCode === 0 && result.result?.list) {
+        const klines = result.result.list;
+        const startPrice = parseFloat(klines[0][1]); // Open price of first candle
+        const baseEquity = isLiveMode ? realBalance : BASE_EQUITY;
         
-        // Use the provided base equity (from parent component)
-        const baseEquityValue = currentBalance;
+        let peakEquity = baseEquity;
+        let maxDrawdown = 0;
+        let peakPrice = startPrice;
         
-        // Generate realistic equity curve based on current price
-        const generatedData: EquityPoint[] = [];
-        const now = new Date();
-        const volatility = Math.abs(change24h) / 100;
-        const noiseFactor = mode === 'paper' ? 0.3 : 0.5;
-        
-        // Use real data points for the last 24 hours
-        const klineResponse = await fetch(`${BYBIT_API.spot}?category=linear&symbol=BTCUSDT`);
-        const klineData = await klineResponse.json();
-        
-        let historicalPrices: number[] = [];
-        if (klineData.retCode === 0 && klineData.result?.list) {
-          // Use the ticker data to generate historical-like points
-          const basePrice = parseFloat(ticker.lastPrice);
-          for (let i = 0; i < 24; i++) {
-            const change = (Math.random() - 0.5) * 0.02 * noiseFactor;
-            const pricePoint = basePrice * (1 + change * (i / 24));
-            historicalPrices.push(pricePoint);
-          }
-        } else {
-          // Fallback to simulated data
-          for (let i = 0; i < 24; i++) {
-            const change = (Math.random() - 0.5) * 0.02 * noiseFactor;
-            historicalPrices.push(price * (1 + change));
-          }
-        }
-        
-        // Sort and use as historical data
-        historicalPrices.sort((a, b) => a - b);
-        const startPrice = historicalPrices[0] || price;
-        const endPrice = historicalPrices[historicalPrices.length - 1] || price;
-        
-        for (let i = 0; i < 24; i++) {
-          const time = new Date(now);
-          time.setHours(time.getHours() - (23 - i));
-          const hourStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        // Calculate equity and drawdown from real price data
+        const equityData: EquityPoint[] = klines.map((k: any, i: number) => {
+          const close = parseFloat(k[4]);
+          const priceChange = ((close - startPrice) / startPrice);
+          const equity = baseEquity * (1 + priceChange * 0.5);
           
-          const progress = i / 23;
-          const priceAtTime = startPrice + (endPrice - startPrice) * progress + (Math.random() - 0.5) * 0.005 * noiseFactor;
-          const pctChange = (priceAtTime - startPrice) / startPrice;
-          const equity = baseEquityValue * (1 + pctChange);
-          const pnl = equity - baseEquityValue;
+          // Track peak equity for drawdown calculation
+          if (equity > peakEquity) {
+            peakEquity = equity;
+            peakPrice = close;
+          }
           
-          generatedData.push({
-            time: hourStr,
+          // Calculate drawdown from peak equity
+          const drawdown = peakEquity > 0 ? ((equity - peakEquity) / peakEquity) * 100 : 0;
+          
+          // Track max drawdown
+          if (drawdown < maxDrawdown) {
+            maxDrawdown = drawdown;
+          }
+          
+          const date = new Date(parseInt(k[0]));
+          const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          const timeStr = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+          
+          return {
+            date: `${dateStr} ${timeStr}`,
             equity: Math.round(equity * 100) / 100,
-            pnl: Math.round(pnl * 100) / 100,
-          });
-        }
-        
-        // Adjust for actual P&L from positions
-        if (mode === 'live' && positionsPnl !== 0) {
-          const lastIndex = generatedData.length - 1;
-          if (lastIndex >= 0) {
-            const adjustment = positionsPnl / generatedData.length;
-            for (let i = 0; i < generatedData.length; i++) {
-              generatedData[i].equity += adjustment * (i / generatedData.length);
-              generatedData[i].pnl = generatedData[i].equity - baseEquityValue;
-            }
-          }
-        }
-        
-        setData(generatedData);
-        
-        // Calculate stats
-        const start = generatedData[0]?.equity || baseEquityValue;
-        const end = generatedData[generatedData.length - 1]?.equity || baseEquityValue;
-        const totalPnl = end - start;
-        const totalReturn = (totalPnl / start) * 100;
-        
-        setStats({
-          pnl: totalPnl,
-          return: totalReturn,
-          startEquity: start,
-          currentEquity: end,
+            drawdown: Math.round(drawdown * 100) / 100,
+          };
         });
+        
+        // Create enhanced data with more points for smoother curve
+        const enhancedData: EquityPoint[] = [];
+        equityData.forEach((point, i) => {
+          enhancedData.push(point);
+          if (i < equityData.length - 1) {
+            const nextPoint = equityData[i + 1];
+            const midEquity = (point.equity + nextPoint.equity) / 2;
+            const midDrawdown = (point.drawdown + nextPoint.drawdown) / 2;
+            
+            // Add mid-point for smoother curve
+            enhancedData.push({
+              date: `${point.date} → ${nextPoint.date}`,
+              equity: Math.round(midEquity * 100) / 100,
+              drawdown: Math.round(midDrawdown * 100) / 100,
+            });
+          }
+        });
+        
+        // Calculate final stats
+        const finalEquity = enhancedData[enhancedData.length - 1]?.equity || baseEquity;
+        const totalReturn = ((finalEquity - baseEquity) / baseEquity) * 100;
+        
+        setData(enhancedData);
+        setStats({
+          startEquity: baseEquity,
+          currentEquity: finalEquity,
+          totalReturn: totalReturn,
+          maxDrawdown: Math.round(Math.abs(maxDrawdown) * 100) / 100,
+          peakEquity: peakEquity,
+        });
+        
+        setError(null);
+      } else {
+        throw new Error(result?.retMsg || 'Failed to fetch kline data');
       }
     } catch (error) {
       console.error('Failed to fetch equity data:', error);
+      setError('Failed to load equity data');
     } finally {
       setIsLoading(false);
     }
@@ -300,10 +310,11 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
         console.log('Public WebSocket connected');
         setConnectionStatus('connected');
         setReconnectAttempts(0);
+        setError(null);
         
         ws.send(JSON.stringify({
           op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
+          args: ['tickers.BTCUSDT']
         }));
         
         startHeartbeat();
@@ -313,8 +324,8 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
         try {
           const data = JSON.parse(event.data);
           if (data.topic === 'tickers') {
-            // Update equity data on price changes
-            fetchEquityData();
+            // Update data on price changes
+            fetchData();
           } else if (data.op === 'pong') {
             // Heartbeat response - ignore
           }
@@ -337,7 +348,6 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
           clearTimeout(reconnectTimeoutRef.current);
         }
         
-        // Only attempt reconnect if not a normal closure
         if (event.code !== 1000) {
           const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
           reconnectTimeoutRef.current = setTimeout(() => {
@@ -347,7 +357,7 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
         }
       };
     } catch (err) {
-      console.error('Failed to connect WebSocket:', err);
+      console.error('Failed to connect public WebSocket:', err);
       setConnectionStatus('disconnected');
     }
   };
@@ -355,7 +365,7 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
   // Connect to private WebSocket for Unified Account
   const connectPrivateWebSocket = () => {
     const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-    if (!apiKey || !apiSecret || mode !== 'live') return;
+    if (!apiKey || !apiSecret) return;
 
     try {
       const wsUrl = isTestnet 
@@ -372,7 +382,7 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
         const expires = Date.now() + 10000;
         const timestamp = expires.toString();
         const recvWindow = '5000';
-        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
+        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, '');
         
         privateWs.send(JSON.stringify({
           op: 'auth',
@@ -389,21 +399,16 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
             console.log('Private WebSocket authenticated');
             setConnectionStatus('authenticated');
             
-            // Subscribe to position and wallet updates
+            // Subscribe to wallet updates
             privateWs.send(JSON.stringify({
               op: 'subscribe',
-              args: ['position', 'wallet'],
+              args: ['wallet'],
             }));
-          }
-          
-          // Handle position updates
-          if (data.topic === 'position' && data.data) {
-            fetchEquityData();
           }
           
           // Handle wallet updates
           if (data.topic === 'wallet' && data.data) {
-            fetchEquityData();
+            fetchData();
           }
         } catch (err) {
           // Ignore parse errors
@@ -416,7 +421,6 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
 
       privateWs.onclose = () => {
         console.log('Private WebSocket disconnected');
-        // Attempt to reconnect after delay
         setTimeout(connectPrivateWebSocket, 10000);
       };
     } catch (err) {
@@ -459,14 +463,13 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
   };
 
   useEffect(() => {
-    fetchEquityData();
+    fetchData();
     connectWebSocket();
     connectPrivateWebSocket();
     
-    // Refresh every 60 seconds if disconnected
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
-        fetchEquityData();
+        fetchData();
       }
     }, 60000);
     
@@ -474,9 +477,9 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
       clearInterval(interval);
       disconnectWebSocket();
     };
-  }, [baseEquity, mode]);
+  }, []);
 
-  if (isLoading || data.length === 0) {
+  if (isLoading) {
     return (
       <div className="card-surface p-5">
         <div className="flex items-center justify-center py-12">
@@ -487,26 +490,42 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
     );
   }
 
-  const modeLabel = mode === 'paper' ? 'Paper Trading Session' : 'Live Trading Session';
-  const maxEquity = Math.max(...data.map(d => d.equity));
-  const minEquity = Math.min(...data.map(d => d.equity));
-  const range = maxEquity - minEquity || 1;
+  if (error) {
+    return (
+      <div className="card-surface p-5">
+        <div className="flex items-center gap-3 text-negative">
+          <AlertCircle size={20} />
+          <span className="text-sm">{error}</span>
+          <button
+            onClick={fetchData}
+            className="ml-auto text-xs font-medium text-primary hover:underline"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (data.length === 0) {
+    return (
+      <div className="card-surface p-5">
+        <div className="flex items-center justify-center py-12">
+          <span className="text-sm text-muted-foreground">No equity data available</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="card-surface p-5">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-semibold text-foreground">
-            Intraday Equity Curve
+            Equity Curve
           </h3>
           <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
-            {new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} · {modeLabel}
-            {mode === 'paper' && (
-              <span className="text-yellow-600 dark:text-yellow-400">(${stats.startEquity.toFixed(0)} Virtual)</span>
-            )}
-            {mode === 'live' && stats.startEquity > 0 && (
-              <span className="text-green-600 dark:text-green-400">(${stats.startEquity.toFixed(0)} Real Balance)</span>
-            )}
+            Based on BTC price action · {data.length} data points
             <span className="flex items-center gap-1 text-[10px]">
               {connectionStatus === 'authenticated' ? (
                 <span className="text-green-500">●</span>
@@ -521,37 +540,61 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
                connectionStatus === 'connected' ? 'Connected' :
                connectionStatus === 'connecting' ? 'Connecting...' : 'Offline'}
             </span>
+            {accountInfo && (
+              <span className="text-[10px] text-muted-foreground">
+                · {accountInfo.accountType} Account
+              </span>
+            )}
+            {isLiveMode && (
+              <span className="text-[10px] text-green-600 dark:text-green-400">
+                · Live Balance: ${liveBalance.toFixed(2)}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="text-right">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
-              Session P&L
-            </p>
-            <p className={`text-sm font-bold font-tabular ${stats.pnl >= 0 ? 'text-positive' : 'text-negative'}`}>
-              {stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}
-            </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowDrawdown(false)}
+              className={`text-xs px-2.5 py-1 rounded-md font-medium transition-all duration-150 ${
+                !showDrawdown
+                  ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Equity
+            </button>
+            <button
+              onClick={() => setShowDrawdown(true)}
+              className={`text-xs px-2.5 py-1 rounded-md font-medium transition-all duration-150 ${
+                showDrawdown
+                  ? 'bg-negative-subtle text-negative' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Drawdown
+            </button>
           </div>
           <div className="text-right">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
-              Return
-            </p>
-            <p className={`text-sm font-bold font-tabular ${stats.return >= 0 ? 'text-positive' : 'text-negative'}`}>
-              {stats.return >= 0 ? '+' : ''}{stats.return.toFixed(2)}%
+            <p className="text-[10px] text-muted-foreground">Total Return</p>
+            <p className={`text-sm font-bold font-tabular ${stats.totalReturn >= 0 ? 'text-positive' : 'text-negative'}`}>
+              {stats.totalReturn >= 0 ? '+' : ''}{stats.totalReturn.toFixed(2)}%
             </p>
           </div>
         </div>
       </div>
 
-      <ResponsiveContainer width="100%" height={140}>
+      <ResponsiveContainer width="100%" height={220}>
         <AreaChart
           data={data}
           margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
         >
           <defs>
-            <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.25} />
+            <linearGradient id="equityCurveGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.2} />
               <stop offset="95%" stopColor="var(--primary)" stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="drawdownGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="var(--negative)" stopOpacity={0.3} />
+              <stop offset="95%" stopColor="var(--negative)" stopOpacity={0.02} />
             </linearGradient>
           </defs>
           <CartesianGrid
@@ -560,19 +603,21 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
             vertical={false}
           />
           <XAxis
-            dataKey="time"
+            dataKey="date"
             tick={{ fill: 'var(--muted-foreground)', fontSize: 10 }}
             axisLine={false}
             tickLine={false}
-            interval={3}
+            interval={4}
           />
           <YAxis
-            domain={[minEquity - range * 0.1, maxEquity + range * 0.1]}
+            dataKey={showDrawdown ? 'drawdown' : 'equity'}
             tick={{ fill: 'var(--muted-foreground)', fontSize: 10 }}
             axisLine={false}
             tickLine={false}
-            tickFormatter={(v) => `$${v.toFixed(0)}`}
-            width={48}
+            tickFormatter={(v) =>
+              showDrawdown ? `${v.toFixed(1)}%` : `$${(v / 1000).toFixed(1)}k`
+            }
+            width={52}
           />
           <Tooltip content={<CustomTooltip />} />
           <ReferenceLine
@@ -584,14 +629,14 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
           />
           <Area
             type="monotone"
-            dataKey="equity"
-            stroke="var(--primary)"
+            dataKey={showDrawdown ? 'drawdown' : 'equity'}
+            stroke={showDrawdown ? 'var(--negative)' : 'var(--primary)'}
             strokeWidth={2}
-            fill="url(#equityGradient)"
+            fill={showDrawdown ? 'url(#drawdownGrad)' : 'url(#equityCurveGrad)'}
             dot={false}
             activeDot={{
               r: 4,
-              fill: 'var(--primary)',
+              fill: showDrawdown ? 'var(--negative)' : 'var(--primary)',
               stroke: 'var(--card)',
               strokeWidth: 2,
             }}
@@ -599,23 +644,27 @@ export default function EquitySparklineInner({ mode = 'paper', baseEquity = 100 
         </AreaChart>
       </ResponsiveContainer>
 
-      <div className="flex justify-between mt-3 pt-2 border-t border-border text-[10px] text-muted-foreground">
-        <span>
-          Start: <span className="font-mono text-foreground">${stats.startEquity.toFixed(2)}</span>
-        </span>
-        <span>
-          Current: <span className="font-mono text-foreground">${stats.currentEquity.toFixed(2)}</span>
-        </span>
-        <span>
-          Range: <span className="font-mono text-foreground">${minEquity.toFixed(0)} - ${maxEquity.toFixed(0)}</span>
-        </span>
-        {mode === 'live' && (
-          <span className="text-[10px] text-muted-foreground">
-            P&L: <span className={positionsPnl >= 0 ? 'text-positive' : 'text-negative'}>
-              {positionsPnl >= 0 ? '+' : ''}${positionsPnl.toFixed(2)}
-            </span>
+      <div className="mt-3 pt-3 border-t border-border">
+        <div className="flex justify-between text-[10px] text-muted-foreground">
+          <span>
+            Start Equity: <span className="text-foreground font-mono">${stats.startEquity.toLocaleString()}</span>
           </span>
-        )}
+          <span>
+            Current: <span className="text-foreground font-mono">${stats.currentEquity.toLocaleString()}</span>
+          </span>
+          <span>
+            Max DD: <span className="text-negative font-mono">{stats.maxDrawdown.toFixed(1)}%</span>
+          </span>
+          <span>
+            Peak: <span className="text-foreground font-mono">${stats.peakEquity.toLocaleString()}</span>
+          </span>
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-1">
+          <span className="text-muted-foreground">Data source:</span> Bybit BTCUSDT 4h klines
+          {accountInfo && (
+            <span className="ml-1">· {accountInfo.accountType} Account</span>
+          )}
+        </p>
       </div>
     </div>
   );
