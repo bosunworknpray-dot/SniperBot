@@ -135,9 +135,10 @@ class RealtimeManager {
         this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 5000);
         console.debug('[RealtimeManager] ws closed, scheduled reconnect');
       };
-      this.ws.onerror = () => {
-        logger.error('RealtimeManager', 'ws error');
-        console.debug('[RealtimeManager] ws error');
+      this.ws.onerror = (event: Event) => {
+        const errorMsg = event instanceof ErrorEvent ? event.message : 'WebSocket connection error (check network/CORS)';
+        logger.error('RealtimeManager', 'WebSocket error', { error: errorMsg, state: this.ws?.readyState });
+        console.debug('[RealtimeManager] ws error:', errorMsg);
       };
     } catch (err) {
       logger.error('RealtimeManager', 'connectWebSocket failed', { error: (err as Error).message });

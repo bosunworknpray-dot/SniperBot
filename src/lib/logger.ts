@@ -94,11 +94,13 @@ class Logger {
   private logToConsole(entry: LogEntry) {
     const prefix = `[${entry.timestamp}] [${entry.service}]`;
     const method = entry.level === 'error' ? 'error' : entry.level === 'warn' ? 'warn' : 'log';
-
-    console[method](prefix, entry.message, entry.data || '');
+    
+    // Format data for better readability
+    const dataStr = entry.data ? (typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data)) : '';
+    (console[method as keyof typeof console] as any)(prefix, entry.message, dataStr);
 
     if (entry.stack) {
-      console[method](entry.stack);
+      (console[method as keyof typeof console] as any)(entry.stack);
     }
   }
 
