@@ -613,7 +613,20 @@ export default function SignalEnginePage() {
         liquidationPrice: signal.entryPrice * 0.95,
         source: 'live',
         orderId: orderResult.orderId,
-      }]);
+      }] );
+
+      appendSharedAlert({
+        id: `alert-live-order-${signal.id}-${Date.now()}`,
+        type: 'trade',
+        priority: 'high',
+        title: 'Live order executed',
+        message: `Bybit order ${orderResult.orderId} placed for ${signal.symbol} ${signal.direction}.`, 
+        time: new Date().toLocaleTimeString(),
+        read: false,
+        timestamp: Date.now(),
+        symbol: signal.symbol,
+        price: signal.entryPrice,
+      });
 
       setSignals(prev => prev.map(s => s.id === signal.id ? { ...s, status: 'executed' } : s));
     } catch (err: any) {

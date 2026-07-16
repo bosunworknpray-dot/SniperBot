@@ -38,4 +38,5 @@ export function readLiveTrades(): LiveTradeRecord[] {
 export function writeLiveTrades(trades: LiveTradeRecord[]) {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(LIVE_TRADES_KEY, JSON.stringify(trades));
+  window.dispatchEvent(new CustomEvent('bybit-trades-updated'));
 }

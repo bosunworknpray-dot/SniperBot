@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
 import { calculateLivePnl, getSharedTradingState, setSharedMetrics, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
@@ -78,24 +78,11 @@ const fetchWalletBalance = async (): Promise<{ totalEquity: number; availableBal
       return { totalEquity: 100, availableBalance: 100 };
     }
 
-    const recvWindow = '5000';
-    const params = '';
-    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
-
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
-      method: 'GET',
-      headers,
-    });
-
-    const data = await safeJsonParse(response);
-    if (data?.retCode === 0 && data?.result?.list?.[0]) {
-      const wallet = data.result.list[0];
-      return {
-        totalEquity: parseFloat(wallet.totalEquity || '100'),
-        availableBalance: parseFloat(wallet.availableBalance || '100'),
-      };
-    }
-    return { totalEquity: 100, availableBalance: 100 };
+    const wallet = await fetchBybitWalletBalance(apiKey, apiSecret);
+    return {
+      totalEquity: wallet.totalEquity > 0 ? wallet.totalEquity : 100,
+      availableBalance: wallet.availableBalance > 0 ? wallet.availableBalance : wallet.totalEquity > 0 ? wallet.totalEquity : 100,
+    };
   } catch (error) {
     console.error('Error fetching wallet balance:', error);
     return { totalEquity: 100, availableBalance: 100 };
@@ -112,7 +99,7 @@ const fetchPositions = async (): Promise<any[]> => {
     const params = '';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list?category=linear&accountType=UNIFIED&settleCoin=USDT`, {
       method: 'GET',
       headers,
     });
@@ -135,7 +122,7 @@ const fetchOrderHistory = async (): Promise<any[]> => {
     if (!apiKey || !apiSecret) return [];
 
     const recvWindow = '5000';
-    const params = 'category=linear&limit=100';
+    const params = 'accountType=UNIFIED&category=linear&settleCoin=USDT&limit=100';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/order/history?${params}`, {
@@ -370,7 +357,13 @@ export default function PerformanceAnalyticsPage() {
   // Initialize
   useEffect(() => {
     fetchAllData();
-    const unsubscribe = realtimeManager.subscribeTicks(() => {
+
+    const unsubscribeTick = realtimeManager.subscribeTicks(() => {
+      fetchAllData();
+    });
+
+    const unsubscribeData = realtimeManager.subscribeData(() => {
+      setConnectionStatus(realtimeManager.isWsConnected() ? 'connected' : 'connecting');
       fetchAllData();
     });
 
@@ -382,9 +375,10 @@ export default function PerformanceAnalyticsPage() {
 
     return () => {
       clearInterval(interval);
-      unsubscribe();
+      unsubscribeTick();
+      unsubscribeData();
     };
-  }, [fetchAllData]);
+  }, [fetchAllData, connectionStatus]);
 
   const handleRefresh = () => {
     setIsRefreshing(true);
