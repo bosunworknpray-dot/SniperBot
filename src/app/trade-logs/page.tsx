@@ -7,6 +7,7 @@ import AppLayout from '@/components/AppLayout';
 import { realtimeManager } from '@/lib/realtimeManager';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
 import { calculateLivePnl, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
+import { writeLiveTrades, readLiveTrades } from '@/lib/liveTrades';
 import { 
   Activity, Search, Download, ChevronUp, ChevronDown,
   Wifi, WifiOff, RefreshCw, AlertCircle, X, Filter,
@@ -72,15 +73,6 @@ const readPaperTrades = (): any[] => {
   }
 };
 
-const readLiveTrades = (): any[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    return JSON.parse(window.localStorage.getItem('live_trades') || '[]');
-  } catch {
-    return [];
-  }
-};
-
 const formatPrice = (price: number): string => {
   if (price >= 1000) return price.toFixed(2);
   if (price >= 1) return price.toFixed(4);
@@ -88,11 +80,13 @@ const formatPrice = (price: number): string => {
 };
 
 const calculateTradePnl = (trade: any, currentPrice: number | null) => {
-  const entryPrice = parseFloat(trade.entryPrice || 0);
-  const size = parseFloat(trade.size || 0.001);
+  const entryPrice = Number.isFinite(parseFloat(trade.entryPrice || '0')) ? parseFloat(trade.entryPrice || '0') : 0;
+  const size = Number.isFinite(parseFloat(trade.size || '0')) ? parseFloat(trade.size || '0') : 0;
+  const existingPnl = Number.isFinite(parseFloat(trade.pnl || '0')) ? parseFloat(trade.pnl || '0') : 0;
+  const existingPnlPct = Number.isFinite(parseFloat(trade.pnlPct || '0')) ? parseFloat(trade.pnlPct || '0') : 0;
 
   if (!currentPrice || !entryPrice || !size) {
-    return { pnl: parseFloat(trade.pnl || 0), pnlPct: parseFloat(trade.pnlPct || 0) };
+    return { pnl: existingPnl, pnlPct: existingPnlPct };
   }
 
   const move = trade.side === 'LONG' ? currentPrice - entryPrice : entryPrice - currentPrice;
@@ -114,10 +108,10 @@ const fetchPositions = async (): Promise<Position[]> => {
     if (!apiKey || !apiSecret) return [];
 
     const recvWindow = '5000';
-    const params = '';
+    const params = 'category=linear&accountType=UNIFIED';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list?${params}`, {
       method: 'GET',
       headers,
     });
@@ -158,7 +152,7 @@ const fetchOrderHistory = async (): Promise<Trade[]> => {
     if (!apiKey || !apiSecret) return [];
 
     const recvWindow = '5000';
-    const params = 'category=linear&limit=100';
+    const params = 'accountType=UNIFIED&category=linear&settleCoin=USDT&limit=100';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/order/history?${params}`, {
@@ -173,12 +167,12 @@ const fetchOrderHistory = async (): Promise<Trade[]> => {
       data.result.list.forEach((order: any) => {
         if (order.orderStatus === 'Filled') {
           const side = order.side === 'Buy' ? 'LONG' : 'SHORT';
-          const entryPrice = parseFloat(order.price);
-          const size = parseFloat(order.qty);
+          const entryPrice = parseFloat(order.avgPrice || order.price || order.lastPrice || '0');
+          const size = parseFloat(order.qty || '0');
           const pnl = parseFloat(order.pnl || 0);
-          const pnlPct = entryPrice > 0 ? (pnl / (entryPrice * size)) * 100 : 0;
-          const createdTime = parseInt(order.createdTime);
-          const updatedTime = parseInt(order.updatedTime || order.createdTime);
+          const pnlPct = entryPrice > 0 && size > 0 ? (pnl / (entryPrice * size)) * 100 : 0;
+          const createdTime = parseInt(order.createdTime || order.createdTimeMs || '0', 10) || Date.now();
+          const updatedTime = parseInt(order.updatedTime || order.updatedTimeMs || order.createdTime || '0', 10) || createdTime;
           const duration = updatedTime > createdTime ? 
             `${Math.floor((updatedTime - createdTime) / 60000)}m` : '0m';
 
@@ -187,7 +181,7 @@ const fetchOrderHistory = async (): Promise<Trade[]> => {
             symbol: order.symbol,
             side,
             entryPrice: Math.round(entryPrice * 10000) / 10000,
-            exitPrice: Math.round(parseFloat(order.price) * 10000) / 10000,
+            exitPrice: Math.round((parseFloat(order.avgPrice || order.price || order.lastPrice || '0')) * 10000) / 10000,
             size: Math.abs(size),
             pnl: Math.round(pnl * 100) / 100,
             pnlPct: Math.round(pnlPct * 10) / 10,
@@ -201,11 +195,11 @@ const fetchOrderHistory = async (): Promise<Trade[]> => {
             entryTimestamp: createdTime,
             exitTimestamp: updatedTime,
             status: 'closed',
-            leverage: parseFloat(order.leverage || 5),
+            leverage: parseFloat(order.leverage || '5'),
             liquidationPrice: entryPrice * 0.95,
             orderId: order.orderId,
             tradeType: order.orderType === 'Market' ? 'market' : 'limit',
-            positionIdx: parseInt(order.positionIdx || 0),
+            positionIdx: parseInt(order.positionIdx || '0', 10),
           });
         }
       });
@@ -587,9 +581,9 @@ export default function TradeLogsPage() {
       return String(av).localeCompare(String(bv)) * dir;
     });
 
-  const totalPnl = filtered.reduce((s, t) => s + t.pnl, 0);
-  const wins = filtered.filter((t) => t.pnl > 0).length;
-  const losses = filtered.filter((t) => t.pnl < 0).length;
+  const totalPnl = filtered.reduce((s, t) => s + (Number.isFinite(t.pnl) ? t.pnl : 0), 0);
+  const wins = filtered.filter((t) => Number.isFinite(t.pnl) && t.pnl > 0).length;
+  const losses = filtered.filter((t) => Number.isFinite(t.pnl) && t.pnl < 0).length;
   const winRate = filtered.length > 0 ? ((wins / filtered.length) * 100).toFixed(1) : '0.0';
   const avgPnl = filtered.length > 0 ? totalPnl / filtered.length : 0;
 

@@ -5,8 +5,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { realtimeManager } from '@/lib/realtimeManager';
-import { BYBIT_BASE_URL, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, fetchBybitWalletBalance, getBybitCredentials, normalizeBybitQty, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
 import { appendSharedAlert, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
+import { readLiveTrades, writeLiveTrades } from '@/lib/liveTrades';
 import { 
   Zap, TrendingUp, TrendingDown, RefreshCw, ChevronDown, ChevronUp,
   AlertCircle, CheckCircle, Clock, Filter, Search, X,
@@ -77,21 +78,6 @@ const readPaperTrades = (): any[] => {
 const writePaperTrades = (trades: any[]) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem('paper_trades', JSON.stringify(trades));
-  window.dispatchEvent(new CustomEvent('bybit-trades-updated'));
-};
-
-const readLiveTrades = (): any[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    return JSON.parse(window.localStorage.getItem('live_trades') || '[]');
-  } catch {
-    return [];
-  }
-};
-
-const writeLiveTrades = (trades: any[]) => {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem('live_trades', JSON.stringify(trades));
   window.dispatchEvent(new CustomEvent('bybit-trades-updated'));
 };
 
@@ -558,16 +544,8 @@ export default function SignalEnginePage() {
       if (walletCacheRef.current && (now - walletCacheRef.current.ts) < 60000) {
         available = walletCacheRef.current.available;
       } else {
-        const stateResp = await fetch('/api/bybit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ endpoint: '/v5/account/wallet-balance', method: 'GET' }),
-        });
-        const wallet = await stateResp.json();
-        // Prefer totalEquity when present (treat as account balance), fallback to availableBalance/walletBalance
-        const totalEquity = parseFloat(wallet?.result?.list?.[0]?.totalEquity || wallet?.result?.list?.[0]?.equity || '0') || 0;
-        const avail = parseFloat(wallet?.result?.list?.[0]?.availableBalance || wallet?.result?.list?.[0]?.walletBalance || '0') || 0;
-        available = totalEquity > 0 ? totalEquity : avail;
+        const wallet = await fetchBybitWalletBalance(apiKey, apiSecret);
+        available = wallet.availableBalance > 0 ? wallet.availableBalance : wallet.totalEquity;
         walletCacheRef.current = { available, ts: now };
       }
       // Use 10% of total equity for each trade by default (can be overridden
@@ -591,10 +569,15 @@ export default function SignalEnginePage() {
         if (size < MIN_SIZE) throw new Error('Insufficient funds to place order');
       }
 
+      const normalizedQty = await normalizeBybitQty(signal.symbol, size);
+      if (!Number.isFinite(normalizedQty) || normalizedQty <= 0) {
+        throw new Error('Live order quantity invalid after normalization');
+      }
+
       const orderResult = await placeBybitOrder({
         symbol: signal.symbol,
         side: signal.direction,
-        qty: size,
+        qty: normalizedQty,
         leverage,
         apiKey,
         apiSecret,
@@ -613,7 +596,7 @@ export default function SignalEnginePage() {
         side: signal.direction,
         entryPrice: signal.entryPrice,
         exitPrice: signal.entryPrice,
-        size,
+        size: normalizedQty,
         pnl: 0,
         pnlPct: 0,
         confidence: signal.confidence,

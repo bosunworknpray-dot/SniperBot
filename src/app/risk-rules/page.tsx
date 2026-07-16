@@ -130,10 +130,10 @@ const fetchPositions = async (): Promise<any[]> => {
     if (!apiKey || !apiSecret) return [];
 
     const recvWindow = '5000';
-    const params = '';
+    const params = 'category=linear&accountType=UNIFIED';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list?${params}`, {
       method: 'GET',
       headers,
     });

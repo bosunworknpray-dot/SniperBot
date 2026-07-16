@@ -86,6 +86,50 @@ export interface BybitWalletBalance {
   walletBalance: number;
 }
 
+export interface BybitInstrumentInfo {
+  minOrderQty: number;
+  qtyStep: number;
+}
+
+export async function fetchBybitInstrumentInfo(symbol: string): Promise<BybitInstrumentInfo | null> {
+  try {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/market/instruments-info?category=linear&symbol=${encodeURIComponent(symbol)}`);
+    const data = await safeJsonParse(response);
+    const info = data?.result?.list?.[0];
+    if (!info) return null;
+
+    const lot = info.lotSizeFilter || info.lot_size_filter || info.sizeFilter || info.size_filter || {};
+    const minOrderQty = parseFloat(lot.minOrderQty || lot.min_qty || lot.min || '0') || 0;
+    const qtyStep = parseFloat(lot.qtyStep || lot.stepSize || lot.qty_step || lot.step || '0') || 0;
+
+    return { minOrderQty, qtyStep };
+  } catch (error) {
+    console.warn('fetchBybitInstrumentInfo failed', { symbol, error });
+    return null;
+  }
+}
+
+export async function normalizeBybitQty(symbol: string, qty: number): Promise<number> {
+  if (!Number.isFinite(qty) || qty <= 0) return 0;
+  const instrument = await fetchBybitInstrumentInfo(symbol);
+  if (!instrument) return parseFloat(qty.toFixed(8));
+
+  const { minOrderQty, qtyStep } = instrument;
+  let normalizedQty = qty;
+
+  if (qtyStep > 0) {
+    normalizedQty = Math.floor(qty / qtyStep) * qtyStep;
+    if (normalizedQty < qtyStep) normalizedQty = qtyStep;
+  }
+
+  if (minOrderQty > 0 && normalizedQty < minOrderQty) {
+    normalizedQty = minOrderQty;
+  }
+
+  if (!Number.isFinite(normalizedQty) || normalizedQty <= 0) return 0;
+  return parseFloat(normalizedQty.toFixed(8));
+}
+
 export async function fetchBybitWalletBalance(
   apiKey?: string,
   apiSecret?: string
@@ -158,12 +202,20 @@ export async function placeBybitOrder(options: {
     body: JSON.stringify(leverageBody),
   });
 
+  const normalizedQty = await normalizeBybitQty(symbol, qty);
+  if (!Number.isFinite(normalizedQty) || normalizedQty <= 0) {
+    return {
+      success: false,
+      error: 'Invalid order quantity after Bybit round-off. Adjust order size or symbol settings.',
+    };
+  }
+
   const orderBody = {
     category: 'linear',
     symbol,
     side: orderSide,
     orderType: 'Market',
-    qty: qty.toString(),
+    qty: normalizedQty.toString(),
     timeInForce: 'GTC',
     accountType: 'UNIFIED',
     ...(typeof positionIdx === 'number' ? { positionIdx } : {}),
