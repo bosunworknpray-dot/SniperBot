@@ -1,0 +1,189 @@
+// lib/validators.ts
+// Zod schemas for Bybit API validation
+
+import { z } from 'zod';
+
+// ============== ACCOUNT & BALANCE ==============
+export const BybitWalletResponseSchema = z.object({
+  retCode: z.number(),
+  retMsg: z.string(),
+  result: z.object({
+    list: z.array(
+      z.object({
+        totalEquity: z.string(),
+        accountIMRate: z.string(),
+        totalMarginBalance: z.string(),
+        totalInitialMargin: z.string(),
+        accountType: z.string(),
+        totalAvailableBalance: z.string(),
+        coin: z.array(
+          z.object({
+            coin: z.string(),
+            equity: z.string(),
+            walletBalance: z.string(),
+            free: z.string(),
+            locked: z.string(),
+          })
+        ),
+      })
+    ),
+  }),
+});
+
+export const BybitAccountInfoSchema = z.object({
+  retCode: z.number(),
+  retMsg: z.string(),
+  result: z.object({
+    uid: z.string(),
+    accountType: z.string(),
+    unifiedMarginStatus: z.number().optional(),
+  }),
+});
+
+// ============== POSITIONS ==============
+export const BybitPositionSchema = z.object({
+  positionIdx: z.coerce.number(),
+  riskId: z.string(),
+  symbol: z.string(),
+  side: z.enum(['Buy', 'Sell', 'None']),
+  size: z.string(),
+  positionValue: z.string(),
+  entryPrice: z.string().or(z.number()),
+  markPrice: z.string(),
+  leverage: z.string(),
+  positionBalance: z.string(),
+  autoAddMargin: z.number().optional(),
+  positionStatus: z.string(),
+  sessionAvgPrice: z.string().optional(),
+  createdTime: z.string(),
+  updatedTime: z.string(),
+  realizedPnl: z.string(),
+  unrealisedPnl: z.string(),
+  cumRealisedPnl: z.string().optional(),
+  stopLoss: z.string(),
+  takeProfit: z.string(),
+  trailingStop: z.string().optional(),
+  tpSlMode: z.string().optional(),
+  activePrice: z.string().optional(),
+  liquidationPrice: z.string(),
+  adlRankIndicator: z.number().optional(),
+});
+
+export const BybitPositionListSchema = z.object({
+  retCode: z.number(),
+  retMsg: z.string(),
+  result: z.object({
+    list: z.array(BybitPositionSchema),
+    category: z.string(),
+  }),
+});
+
+// ============== ORDERS ==============
+export const BybitOrderSchema = z.object({
+  orderId: z.string(),
+  orderLinkId: z.string().optional(),
+  blockTradeId: z.string().optional(),
+  symbol: z.string(),
+  price: z.string(),
+  qty: z.string(),
+  side: z.enum(['Buy', 'Sell']),
+  positionIdx: z.number().optional(),
+  orderStatus: z.string(),
+  createType: z.string().optional(),
+  cancelType: z.string().optional(),
+  rejectReason: z.string().optional(),
+  avgPrice: z.string(),
+  leavesQty: z.string(),
+  leavesValue: z.string(),
+  cumExecQty: z.string(),
+  cumExecValue: z.string(),
+  cumExecFee: z.string(),
+  timeInForce: z.string(),
+  orderType: z.string(),
+  stopPrice: z.string().optional(),
+  triggerPrice: z.string().optional(),
+  triggerDirection: z.number().optional(),
+  triggerBy: z.string().optional(),
+  createTime: z.string(),
+  updateTime: z.string(),
+});
+
+export const BybitOrderResponseSchema = z.object({
+  retCode: z.number(),
+  retMsg: z.string(),
+  result: z.object({
+    orderId: z.string(),
+    orderLinkId: z.string().optional(),
+  }),
+});
+
+// ============== TICKERS ==============
+export const BybitTickerSchema = z.object({
+  symbol: z.string(),
+  lastPrice: z.string(),
+  indexPrice: z.string(),
+  markPrice: z.string(),
+  bid1Price: z.string(),
+  bid1Size: z.string(),
+  ask1Price: z.string(),
+  ask1Size: z.string(),
+  change24h: z.string(),
+  turnover24h: z.string(),
+  volume24h: z.string(),
+  openInterest: z.string(),
+  nextFundingTime: z.string(),
+  fundingRate: z.string(),
+  predictedDeliveryPrice: z.string().optional(),
+  basisMpf: z.string().optional(),
+  basis: z.string().optional(),
+  deliveryFeeRate: z.string().optional(),
+  openInterestValue: z.string().optional(),
+  totalVolume: z.string().optional(),
+  totalTurnover: z.string().optional(),
+});
+
+export const BybitTickersResponseSchema = z.object({
+  retCode: z.number(),
+  retMsg: z.string(),
+  result: z.object({
+    list: z.array(BybitTickerSchema),
+    category: z.string(),
+  }),
+});
+
+// ============== TIME ==============
+export const BybitTimeResponseSchema = z.object({
+  retCode: z.number(),
+  retMsg: z.string(),
+  result: z.object({
+    timeSecond: z.string(),
+    timeNano: z.string(),
+  }),
+});
+
+// ============== HELPER TYPES ==============
+export type WalletBalance = z.infer<typeof BybitWalletResponseSchema>['result']['list'][0];
+export type BybitPosition = z.infer<typeof BybitPositionSchema>;
+export type BybitOrder = z.infer<typeof BybitOrderSchema>;
+export type BybitTicker = z.infer<typeof BybitTickerSchema>;
+
+// ============== SAFE PARSE HELPERS ==============
+export function parseWalletBalance(data: any) {
+  return BybitWalletResponseSchema.safeParse(data);
+}
+
+export function parsePositionList(data: any) {
+  return BybitPositionListSchema.safeParse(data);
+}
+
+export function parseOrderResponse(data: any) {
+  return BybitOrderResponseSchema.safeParse(data);
+}
+
+export function parseTickers(data: any) {
+  return BybitTickersResponseSchema.safeParse(data);
+}
+
+export function parseTimeResponse(data: any) {
+  return BybitTimeResponseSchema.safeParse(data);
+}
