@@ -353,25 +353,40 @@ export default function PerformanceAnalyticsPage() {
   }, [hasValidCredentials]);
 
   const disconnectWebSocket = useCallback(() => { /* noop - singleton manages WS */ }, []);
+  const lastAnalyticsRefreshRef = useRef<number>(0);
+  const ANALYTICS_REFRESH_MS = 60000;
 
   // Initialize
   useEffect(() => {
     fetchAllData();
 
+    const shouldRefresh = () => {
+      const now = Date.now();
+      if (now - lastAnalyticsRefreshRef.current < ANALYTICS_REFRESH_MS) {
+        return false;
+      }
+      lastAnalyticsRefreshRef.current = now;
+      return true;
+    };
+
     const unsubscribeTick = realtimeManager.subscribeTicks(() => {
-      fetchAllData();
+      if (shouldRefresh()) {
+        fetchAllData();
+      }
     });
 
     const unsubscribeData = realtimeManager.subscribeData(() => {
       setConnectionStatus(realtimeManager.isWsConnected() ? 'connected' : 'connecting');
-      fetchAllData();
+      if (shouldRefresh()) {
+        fetchAllData();
+      }
     });
 
     const interval = setInterval(() => {
-      if (connectionStatus === 'disconnected') {
+      if (connectionStatus === 'disconnected' && shouldRefresh()) {
         fetchAllData();
       }
-    }, 60000);
+    }, ANALYTICS_REFRESH_MS);
 
     return () => {
       clearInterval(interval);

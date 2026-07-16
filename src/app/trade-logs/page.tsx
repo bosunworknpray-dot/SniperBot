@@ -73,10 +73,11 @@ const readPaperTrades = (): any[] => {
   }
 };
 
-const formatPrice = (price: number): string => {
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toFixed(6);
+const formatPrice = (price: number | null | undefined): string => {
+  const safePrice = Number.isFinite(price as number) ? Number(price) : 0;
+  if (safePrice >= 1000) return safePrice.toFixed(2);
+  if (safePrice >= 1) return safePrice.toFixed(4);
+  return safePrice.toFixed(6);
 };
 
 const calculateTradePnl = (trade: any, currentPrice: number | null) => {
@@ -104,19 +105,13 @@ const calculateTradePnl = (trade: any, currentPrice: number | null) => {
 // Fetch positions
 const fetchPositions = async (): Promise<Position[]> => {
   try {
-    const { apiKey, apiSecret } = getApiCredentials();
-    if (!apiKey || !apiSecret) return [];
-
-    const recvWindow = '5000';
-    const params = 'category=linear&accountType=UNIFIED';
-    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
-
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list?${params}`, {
-      method: 'GET',
-      headers,
+    const response = await fetch('/api/bybit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: '/v5/position/list', method: 'GET' }),
     });
 
-    const data = await safeJsonParse(response);
+    const data = await response.json();
     const positions: Position[] = [];
 
     if (data?.retCode === 0 && data?.result?.list) {
@@ -148,19 +143,13 @@ const fetchPositions = async (): Promise<Position[]> => {
 // Fetch order history
 const fetchOrderHistory = async (): Promise<Trade[]> => {
   try {
-    const { apiKey, apiSecret } = getApiCredentials();
-    if (!apiKey || !apiSecret) return [];
-
-    const recvWindow = '5000';
-    const params = 'accountType=UNIFIED&category=linear&settleCoin=USDT&limit=100';
-    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
-
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/order/history?${params}`, {
-      method: 'GET',
-      headers,
+    const response = await fetch('/api/bybit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: '/v5/order/history?settleCoin=USDT', method: 'GET' }),
     });
 
-    const data = await safeJsonParse(response);
+    const data = await response.json();
     const trades: Trade[] = [];
 
     if (data?.retCode === 0 && data?.result?.list) {
@@ -216,8 +205,12 @@ const fetchOrderHistory = async (): Promise<Trade[]> => {
 const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => {
   try {
     const promises = symbols.map(symbol =>
-      fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`)
-        .then(r => safeJsonParse(r))
+      fetch('/api/bybit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: `/v5/market/tickers?category=linear&symbol=${symbol}`, method: 'GET' }),
+      })
+        .then((r) => r.json())
         .catch(() => null)
     );
     
@@ -240,8 +233,12 @@ const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => 
 
 const getCurrentPrice = async (symbol: string): Promise<number | null> => {
   try {
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`);
-    const data = await safeJsonParse(response);
+    const response = await fetch('/api/bybit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: `/v5/market/tickers?category=linear&symbol=${symbol}`, method: 'GET' }),
+    });
+    const data = await response.json();
     return parseFloat(data?.result?.list?.[0]?.lastPrice || '0');
   } catch {
     return null;
