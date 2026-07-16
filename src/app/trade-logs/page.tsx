@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
 import { 
   Activity, Search, Download, ChevronUp, ChevronDown,
   Wifi, WifiOff, RefreshCw, AlertCircle, X, Filter,
@@ -52,34 +53,12 @@ interface Position {
 type SortKey = keyof Trade;
 
 // ============== BYBIT API CONFIG ==============
-const BYBIT_BASE_URL = 'https://api.bybit.com';
 const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT'];
 
 // ============== API HELPERS ==============
-const getApiCredentials = () => {
-  return {
-    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-  };
-};
-
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
-  const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
-  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
-};
-
-const safeJsonParse = async (response: Response) => {
-  try {
-    const text = await response.text();
-    if (!text || text.trim() === '') return null;
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-};
+const getApiCredentials = () => getBybitCredentials();
 
 const formatPrice = (price: number): string => {
   if (price >= 1000) return price.toFixed(2);
@@ -95,19 +74,13 @@ const fetchPositions = async (): Promise<Position[]> => {
     const { apiKey, apiSecret } = getApiCredentials();
     if (!apiKey || !apiSecret) return [];
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const params = '';
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
       method: 'GET',
-      headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
-      },
+      headers,
     });
 
     const data = await safeJsonParse(response);
@@ -145,19 +118,13 @@ const fetchOrderHistory = async (): Promise<Trade[]> => {
     const { apiKey, apiSecret } = getApiCredentials();
     if (!apiKey || !apiSecret) return [];
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const params = 'category=linear&limit=100';
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/order/history?${params}`, {
       method: 'GET',
-      headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
-      },
+      headers,
     });
 
     const data = await safeJsonParse(response);
@@ -251,20 +218,14 @@ const executeTradeOnBybit = async (
       return { success: false, error: 'API credentials not configured' };
     }
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
 
-    // Set leverage
-    const leverageParams = `category=linear&symbol=${symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`;
-    const leverageSignature = generateSignature(apiSecret, timestamp, recvWindow, leverageParams);
+    const leverageHeaders = await createBybitAuthHeaders(apiKey, apiSecret, `category=linear&symbol=${symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`, recvWindow);
     
     await fetch(`${BYBIT_BASE_URL}/v5/position/set-leverage`, {
       method: 'POST',
       headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': leverageSignature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
+        ...leverageHeaders,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -278,15 +239,12 @@ const executeTradeOnBybit = async (
     // Place order
     const orderSide = side === 'LONG' ? 'Buy' : 'Sell';
     const orderParams = `category=linear&symbol=${symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC`;
-    const orderSignature = generateSignature(apiSecret, timestamp, recvWindow, orderParams);
+    const orderHeaders = await createBybitAuthHeaders(apiKey, apiSecret, orderParams, recvWindow);
     
     const orderResponse = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
       method: 'POST',
       headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': orderSignature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
+        ...orderHeaders,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -319,19 +277,15 @@ const closePositionOnBybit = async (symbol: string, positionIdx: number, size: n
       return { success: false, error: 'API credentials not configured' };
     }
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const orderSide = side === 'LONG' ? 'Sell' : 'Buy';
     const params = `category=linear&symbol=${symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC&positionIdx=${positionIdx}`;
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
     
     const response = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
       method: 'POST',
       headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
+        ...headers,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({

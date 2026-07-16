@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
+import { BYBIT_BASE_URL, safeJsonParse } from '@/lib/bybit';
 import { 
   Zap, TrendingUp, TrendingDown, RefreshCw, ChevronDown, ChevronUp,
   AlertCircle, CheckCircle, Clock, Filter, Search, X,
@@ -45,7 +46,6 @@ interface Indicator {
 }
 
 // ============== BYBIT API CONFIG ==============
-const BYBIT_BASE_URL = 'https://api.bybit.com';
 const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 
 const SUPPORTED_SYMBOLS = [
@@ -55,22 +55,7 @@ const SUPPORTED_SYMBOLS = [
 ];
 
 // ============== API HELPERS ==============
-const getApiCredentials = () => {
-  return {
-    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-  };
-};
-
-const safeJsonParse = async (response: Response) => {
-  try {
-    const text = await response.text();
-    if (!text || text.trim() === '') return null;
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-};
+const getApiCredentials = () => ({ apiKey: '', apiSecret: '' });
 
 const formatPrice = (price: number): string => {
   if (price >= 1000) return price.toFixed(2);

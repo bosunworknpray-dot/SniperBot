@@ -3,6 +3,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
 import { X, TrendingUp, TrendingDown, ChevronUp, ChevronDown, Loader2, RefreshCw, Plus, Minus } from 'lucide-react';
 import StatusBadge from '@/components/ui/StatusBadge';
 import ConfirmModal from '@/components/ui/ConfirmModal';
@@ -35,34 +36,12 @@ interface Position {
 type SortKey = 'symbol' | 'unrealizedPnl' | 'confidence' | 'holdMins';
 
 // ============== BYBIT API CONFIG ==============
-const BYBIT_BASE_URL = 'https://api.bybit.com';
 const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
 
 // ============== API HELPERS ==============
-const getApiCredentials = () => {
-  return {
-    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-  };
-};
-
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
-  const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
-  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
-};
-
-const safeJsonParse = async (response: Response) => {
-  try {
-    const text = await response.text();
-    if (!text || text.trim() === '') return null;
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-};
+const getApiCredentials = () => getBybitCredentials();
 
 // ============== API FUNCTIONS ==============
 
@@ -72,19 +51,13 @@ const fetchRealPositions = async (): Promise<Position[]> => {
     const { apiKey, apiSecret } = getApiCredentials();
     if (!apiKey || !apiSecret) return [];
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const params = '';
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
       method: 'GET',
-      headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
-      },
+      headers,
     });
 
     const data = await safeJsonParse(response);
@@ -148,20 +121,14 @@ const openPositionOnBybit = async (
       return { success: false, error: 'API credentials not configured' };
     }
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
 
-    // Set leverage
-    const leverageParams = `category=linear&symbol=${symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`;
-    const leverageSignature = generateSignature(apiSecret, timestamp, recvWindow, leverageParams);
+    const leverageHeaders = await createBybitAuthHeaders(apiKey, apiSecret, `category=linear&symbol=${symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`, recvWindow);
 
     await fetch(`${BYBIT_BASE_URL}/v5/position/set-leverage`, {
       method: 'POST',
       headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': leverageSignature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
+        ...leverageHeaders,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -175,15 +142,12 @@ const openPositionOnBybit = async (
     // Place order
     const orderSide = side === 'long' ? 'Buy' : 'Sell';
     const orderParams = `category=linear&symbol=${symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC`;
-    const orderSignature = generateSignature(apiSecret, timestamp, recvWindow, orderParams);
+    const orderHeaders = await createBybitAuthHeaders(apiKey, apiSecret, orderParams, recvWindow);
 
     const orderResponse = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
       method: 'POST',
       headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': orderSignature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
+        ...orderHeaders,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -213,19 +177,15 @@ const closePositionOnBybit = async (position: Position): Promise<boolean> => {
     const { apiKey, apiSecret } = getApiCredentials();
     if (!apiKey || !apiSecret) return false;
 
-    const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const side = position.direction === 'long' ? 'Sell' : 'Buy';
     const params = `category=linear&symbol=${position.symbol}&side=${side}&orderType=Market&qty=${position.size}&timeInForce=GTC&positionIdx=${position.positionIdx || 0}`;
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
       method: 'POST',
       headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
+        ...headers,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
