@@ -6,6 +6,7 @@
 import React, { useEffect } from 'react';
 import { Toaster } from 'sonner';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { RealtimeDataProvider } from '@/components/RealtimeDataProvider';
 import { pnlSync } from '@/lib/pnlSync';
 import { autoExecutor } from '@/lib/autoExecutor';
 import { logger } from '@/lib/logger';
@@ -39,18 +40,20 @@ export default function RootLayoutClient({ children }: { children: React.ReactNo
 
   return (
     <ErrorBoundary>
-      {children}
-      <Toaster
-        position="bottom-right"
-        theme="dark"
-        toastOptions={{
-          style: {
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            color: 'var(--foreground)',
-          },
-        }}
-      />
+      <RealtimeDataProvider pollInterval={2000}>
+        {children}
+        <Toaster
+          position="bottom-right"
+          theme="dark"
+          toastOptions={{
+            style: {
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              color: 'var(--foreground)',
+            },
+          }}
+        />
+      </RealtimeDataProvider>
     </ErrorBoundary>
   );
 }

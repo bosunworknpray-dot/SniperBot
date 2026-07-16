@@ -1,10 +1,11 @@
 // app/components/DashboardHeader.tsx
+// Header showing real-time account balance and status
 
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
-import { RefreshCw, Bell, Wifi, Loader2, Shield } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { RefreshCw, Bell, Wifi, Loader2, Shield, AlertCircle } from 'lucide-react';
+import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 
 interface HeaderData {
   status: 'connected' | 'disconnected' | 'connecting' | 'authenticated';
@@ -14,181 +15,65 @@ interface HeaderData {
   accountType?: string;
   uid?: string;
   balance?: number;
-  isPaperMode?: boolean;
 }
-
-// ============== BYBIT API CONFIG ==============
-const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
-
-// ============== API HELPERS ==============
-const getApiCredentials = () => getBybitCredentials();
-
-// ============== API FUNCTIONS ==============
-
-// Fetch account info
-const fetchAccountInfo = async (): Promise<{ type: string; uid: string; balance: number } | null> => {
-  try {
-    const { apiKey, apiSecret } = getApiCredentials();
-    if (!apiKey || !apiSecret) {
-      return { type: 'Demo', uid: 'N/A', balance: 0 };
-    }
-
-    const balanceData = await fetchBybitWalletBalance(apiKey, apiSecret);
-    return {
-      type: 'Unified',
-      uid: 'N/A',
-      balance: balanceData.totalEquity || 0,
-    };
-  } catch (error) {
-    console.error('Error fetching account info:', error);
-    return null;
-  }
-};
 
 // ============== COMPONENT ==============
 
 export default function DashboardHeader() {
+  const { data: realtimeData, loading: dataLoading, error: dataError } = useSharedRealtimeData();
+  
   const [data, setData] = useState<HeaderData>({
     status: 'connecting',
     latency: 0,
     lastUpdated: new Date().toLocaleTimeString(),
     date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-    isPaperMode: true,
   });
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [unreadAlerts, setUnreadAlerts] = useState(0);
   const [isBotActive, setIsBotActive] = useState(true);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Fetch connection status
-  const fetchConnectionStatus = async () => {
-    try {
-      const start = Date.now();
-      const response = await fetch(`${BYBIT_BASE_URL}/v5/market/time`);
-      const latency = Date.now() - start;
-
-      if (response.ok) {
-        const result = await safeJsonParse(response);
-        if (result?.retCode === 0) {
-          // Fetch account info
-          const accountInfo = await fetchAccountInfo();
-          
-          setData(prev => ({
-            ...prev,
-            status: wsRef.current?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
-            latency,
-            lastUpdated: new Date().toLocaleTimeString(),
-            isPaperMode: !accountInfo?.uid || accountInfo.uid === 'N/A',
-            accountType: accountInfo?.type || prev.accountType,
-            uid: accountInfo?.uid || prev.uid,
-            balance: accountInfo?.balance ?? prev.balance,
-          }));
-        }
-      }
-    } catch (error) {
-      setData(prev => ({ ...prev, status: 'disconnected' }));
-    }
-  };
-
-  // Connect WebSocket
-  const connectWebSocket = () => {
-    try {
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('Dashboard WebSocket connected');
-        setData(prev => ({ ...prev, status: 'connected' }));
-
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: ['tickers.BTCUSDT', 'tickers.ETHUSDT', 'tickers.SOLUSDT']
-        }));
-
-        startHeartbeat();
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            setData(prev => ({ ...prev, lastUpdated: new Date().toLocaleTimeString() }));
-          } else if (data.op === 'pong') {
-            setData(prev => ({ ...prev, latency: 0 }));
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = () => {
-        setData(prev => ({ ...prev, status: 'disconnected' }));
-      };
-
-      ws.onclose = () => {
-        console.log('Dashboard WebSocket disconnected');
-        setData(prev => ({ ...prev, status: 'disconnected' }));
-        stopHeartbeat();
-
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      console.error('Failed to connect dashboard WebSocket:', err);
-      setData(prev => ({ ...prev, status: 'disconnected' }));
-    }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    stopHeartbeat();
-  };
-
+  // Update data from real-time context
   useEffect(() => {
-    fetchConnectionStatus();
-    connectWebSocket();
+    if (realtimeData?.balance) {
+      setData(prev => ({
+        ...prev,
+        status: dataError ? 'disconnected' : 'authenticated',
+        balance: realtimeData.balance.totalEquity,
+        lastUpdated: new Date().toLocaleTimeString(),
+      }));
+    }
+  }, [realtimeData, dataError]);
 
-    const interval = setInterval(fetchConnectionStatus, 30000);
-    return () => {
-      clearInterval(interval);
-      disconnectWebSocket();
-    };
+  // Update date every minute
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setData(prev => ({
+        ...prev,
+        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      }));
+    }, 60000);
+
+    return () => clearInterval(timer);
   }, []);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await fetchConnectionStatus();
-    setIsRefreshing(false);
+    try {
+      // The real-time data will update automatically
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const formatBalance = (balance?: number) => {
+    if (!balance || balance === 0) return '---';
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(balance);
   };
 
   const statusColor = {
@@ -212,41 +97,35 @@ export default function DashboardHeader() {
           <h1 className="text-2xl font-bold text-foreground tracking-tight">
             Live Trading Dashboard
           </h1>
-          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full font-mono ${
-            data.isPaperMode 
-              ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 border border-yellow-200 dark:border-yellow-800'
-              : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800'
-          }`}>
-            {data.isPaperMode ? '📄 PAPER' : '⚡ LIVE'}
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full font-mono bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800">
+            ⚡ MAINNET
           </span>
-          {!data.isPaperMode && data.accountType && (
-            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
-              {data.accountType} Account
-            </span>
-          )}
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
+            Unified Account
+          </span>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
           <div className="flex items-center gap-1.5">
             <Wifi size={11} className={statusColor[data.status]} />
             <span>
-              Bybit WS · {data.status === 'connected' || data.status === 'authenticated' 
-                ? `${data.latency}ms latency` 
+              Bybit API · {data.status === 'connected' || data.status === 'authenticated' 
+                ? 'Live' 
                 : statusText[data.status]}
             </span>
           </div>
-          {!data.isPaperMode && data.uid && (
+          {dataError && (
             <>
               <span>·</span>
-              <div className="flex items-center gap-1.5">
-                <Shield size={11} className="text-muted-foreground" />
-                <span className="font-mono">UID: {data.uid}</span>
+              <div className="flex items-center gap-1.5 text-red-400">
+                <AlertCircle size={11} />
+                <span>{dataError.message}</span>
               </div>
             </>
           )}
-          {!data.isPaperMode && typeof data.balance === 'number' && data.balance > 0 && (
+          {typeof data.balance === 'number' && data.balance > 0 && (
             <>
               <span>·</span>
-              <span className="font-mono text-foreground">Balance: ${data.balance.toFixed(2)}</span>
+              <span className="font-mono text-foreground">Balance: {formatBalance(data.balance)}</span>
             </>
           )}
           <span>·</span>

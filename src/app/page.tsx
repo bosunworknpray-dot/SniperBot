@@ -5,7 +5,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, getBybitCredentials, createBybitAuthHeaders, safeJsonParse } from '@/lib/bybit';
+import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 import { appendSharedAlert, calculateLivePnl, getSharedTradingState, setSharedBalance, setSharedBotState, setSharedMetrics, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
@@ -391,13 +392,14 @@ const closePositionOnBybit = async (position: Position): Promise<{ success: bool
 
 export default function Home() {
   const router = useRouter();
+  const { data: realtimeData, loading: dataLoading, error: dataError } = useSharedRealtimeData();
   
   // State
   const [activeTab, setActiveTab] = useState<'dashboard' | 'analytics' | 'signals' | 'alerts' | 'settings'>('dashboard');
   const [metrics, setMetrics] = useState<AccountMetrics>({
-    totalBalance: 100,
-    availableBalance: 100,
-    equity: 100,
+    totalBalance: realtimeData?.balance?.totalEquity || 100,
+    availableBalance: realtimeData?.balance?.availableBalance || 100,
+    equity: realtimeData?.balance?.totalEquity || 100,
     totalPnl: 0,
     totalPnlPct: 0,
     dailyPnl: 0,
@@ -461,6 +463,60 @@ export default function Home() {
     });
     return unsubscribe;
   }, []);
+
+  // Sync real-time data from context
+  useEffect(() => {
+    if (realtimeData?.balance) {
+      const equity = realtimeData.balance.totalEquity || 100;
+      setActualBalance(equity);
+      setBaseEquity(equity);
+      setPaperEquity(equity);
+      setMetrics(prev => ({
+        ...prev,
+        totalBalance: equity,
+        availableBalance: realtimeData.balance.availableBalance || 100,
+        equity: equity,
+      }));
+    }
+    if (realtimeData?.positions) {
+      // Update positions if available
+      const positions: Position[] = realtimeData.positions
+        .filter(pos => parseFloat(pos.size) !== 0)
+        .map((pos: any) => {
+          const size = parseFloat(pos.size);
+          const side = pos.side === 'Buy' ? 'LONG' : 'SHORT';
+          const entryPrice = parseFloat(pos.avgPrice || pos.entryPrice || 0);
+          const currentPrice = parseFloat(pos.markPrice || pos.currentPrice || 0);
+          const pnl = parseFloat(pos.unrealisedPnl || 0);
+          const pnlPct = entryPrice > 0 ? (pnl / (entryPrice * Math.abs(size))) * 100 : 0;
+          
+          const createdTime = pos.createdTime ? parseInt(pos.createdTime) : Date.now();
+          const duration = `${Math.floor((Date.now() - createdTime) / 60000)}m`;
+          
+          return {
+            id: `pos-${pos.symbol}-${pos.positionIdx || 0}`,
+            symbol: pos.symbol,
+            side,
+            entryPrice,
+            currentPrice,
+            size: Math.abs(size),
+            pnl,
+            pnlPct,
+            entryTime: new Date(createdTime).toISOString(),
+            duration,
+            leverage: parseFloat(pos.leverage || 5),
+            liquidationPrice: parseFloat(pos.liqPrice || 0),
+            stopLoss: parseFloat(pos.stopLoss || 0),
+            takeProfit: parseFloat(pos.takeProfit || 0),
+            positionIdx: parseInt(pos.positionIdx || 0),
+            orderId: pos.orderId,
+          };
+        });
+      if (positions.length > 0) {
+        setPositions(positions);
+      }
+    }
+  }, [realtimeData]);
 
   // Check API credentials
   const hasValidCredentials = useCallback(() => {

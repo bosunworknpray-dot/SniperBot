@@ -72,11 +72,13 @@ async function validateRiskLimits(
 ): Promise<{ allowed: boolean; reason?: string }> {
   try {
     // Check position size
+    const url = `${BYBIT_BASE_URL}/v5/position/list?category=linear`;
+    const positionHeaders = await createBybitHeaders('');
     const positionResponse = await requestManager.executeWithRateLimit(
-      `${BYBIT_BASE_URL}/v5/position/list`,
+      url,
       {
         method: 'GET',
-        headers: await createBybitHeaders(''),
+        headers: positionHeaders,
       }
     );
 
