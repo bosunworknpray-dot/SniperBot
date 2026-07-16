@@ -1,4 +1,5 @@
-// WebSocketConfigPanel.tsx
+// app/components/WebSocketConfigPanel.tsx
+
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -33,13 +34,21 @@ const PRIVATE_CHANNELS: WsChannel[] = [
   { id: 'stop_order', label: 'Stop Orders', description: 'Stop order status updates', topic: 'stopOrder', required: false, enabled: false, category: 'private' },
 ];
 
-const RECONNECT_OPTIONS = ['1s', '3s', '5s', '10s'];
-const PING_OPTIONS = ['10s', '20s', '30s'];
+// ============== BYBIT API CONFIG ==============
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
+const BYBIT_WS_PRIVATE_URL = 'wss://stream.bybit.com/v5/private/linear';
 
-// Generate Bybit signature for WebSocket authentication
-const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
+};
+
+const generateWsSignature = (apiSecret: string, timestamp: string, recvWindow: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow;
+  const paramStr = timestamp + apiSecret + recvWindow;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -71,7 +80,6 @@ class WSConnection {
   }
 
   connect(topics: string[] = []) {
-    // Split topics into public and private
     this.publicTopics = topics.filter(t => 
       ['kline', 'orderbook', 'publicTrade', 'tickers', 'allLiquidation'].some(prefix => t.includes(prefix) || t === prefix)
     );
@@ -96,16 +104,14 @@ class WSConnection {
       this.onStatusCallback?.('connected');
       console.log('WebSocket connected');
       
-      // Subscribe to public topics immediately
       if (this.publicTopics.length > 0) {
         this.subscribe(this.publicTopics);
       }
 
-      // If there are private topics, authenticate first
       if (this.privateTopics.length > 0 && this.apiKey && this.apiSecret) {
         this.authenticate();
       } else if (this.privateTopics.length > 0) {
-        console.warn('Private topics require API credentials. Please set API key and secret.');
+        console.warn('Private topics require API credentials.');
       }
 
       this.startPingInterval();
@@ -129,13 +135,11 @@ class WSConnection {
       try {
         const data = JSON.parse(event.data);
         
-        // Handle authentication response
         if (data.op === 'auth' && data.retCode === 0) {
           this.isAuthenticated = true;
           this.onStatusCallback?.('authenticated');
           console.log('WebSocket authenticated');
           
-          // Subscribe to private topics after authentication
           if (this.privateTopics.length > 0) {
             this.subscribe(this.privateTopics);
           }
@@ -154,7 +158,7 @@ class WSConnection {
     const expires = Date.now() + 10000;
     const timestamp = expires.toString();
     const recvWindow = '5000';
-    const signature = generateWsSignature(this.apiKey, this.apiSecret, timestamp, recvWindow);
+    const signature = generateWsSignature(this.apiSecret, timestamp, recvWindow);
 
     const authMessage = {
       op: 'auth',
@@ -243,7 +247,6 @@ export default function WebSocketConfigPanel() {
   const [maxRetries, setMaxRetries] = useState('5');
   const [saved, setSaved] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connected' | 'reconnecting' | 'error' | 'authenticated'>('disconnected');
-  const [testMode, setTestMode] = useState<'paper' | 'live'>('paper');
   const [receivedMessages, setReceivedMessages] = useState<number>(0);
   const [useAuth, setUseAuth] = useState<boolean>(false);
   const [apiKey, setApiKey] = useState<string>('');
@@ -259,16 +262,7 @@ export default function WebSocketConfigPanel() {
   };
 
   const getWsUrl = () => {
-    // Bybit V5 WebSocket URLs
-    if (testMode === 'paper') {
-      return useAuth 
-        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
-        : 'wss://stream-testnet.bybit.com/v5/public/linear';
-    } else {
-      return useAuth
-        ? 'wss://stream.bybit.com/v5/private/linear'
-        : 'wss://stream.bybit.com/v5/public/linear';
-    }
+    return useAuth ? BYBIT_WS_PRIVATE_URL : BYBIT_WS_URL;
   };
 
   const connectWebSocket = () => {
@@ -283,7 +277,6 @@ export default function WebSocketConfigPanel() {
     const connection = new WSConnection(wsUrl, reconnectMs, pingMs);
     wsConnectionRef.current = connection;
 
-    // Set credentials if authentication is enabled
     if (useAuth && apiKey && apiSecret) {
       connection.setCredentials(apiKey, apiSecret);
     }
@@ -295,7 +288,6 @@ export default function WebSocketConfigPanel() {
     connection.onMessage((data) => {
       setReceivedMessages(prev => prev + 1);
       
-      // Handle authentication response
       if (data.op === 'auth') {
         if (data.retCode === 0) {
           console.log('Authentication successful');
@@ -305,7 +297,7 @@ export default function WebSocketConfigPanel() {
       }
       
       if (data.topic) {
-        console.log(`Received ${data.topic} data:`, data.data);
+        console.log(`Received ${data.topic} data`);
       }
     });
     
@@ -358,7 +350,7 @@ export default function WebSocketConfigPanel() {
     };
   }, []);
 
-  // Load API credentials from localStorage or environment
+  // Load API credentials from localStorage
   useEffect(() => {
     const savedCreds = localStorage.getItem('bybit_credentials');
     if (savedCreds) {
@@ -406,9 +398,7 @@ export default function WebSocketConfigPanel() {
              connectionStatus === 'reconnecting' ? 'Reconnecting...' :
              connectionStatus === 'error' ? 'Error' : 'Disconnected'}
           </span>
-          <span className="text-[10px] text-muted-foreground ml-2">
-            {testMode === 'paper' ? 'Testnet' : 'Mainnet'}
-          </span>
+          <span className="text-[10px] text-muted-foreground ml-2">Mainnet</span>
           {connectionStatus === 'authenticated' && (
             <span className="text-[10px] text-positive ml-2">🔐 Private streams active</span>
           )}
@@ -418,26 +408,16 @@ export default function WebSocketConfigPanel() {
             </span>
           )}
         </div>
-        <div className="flex gap-2 flex-wrap">
-          <select
-            value={testMode}
-            onChange={(e) => setTestMode(e.target.value as 'paper' | 'live')}
-            className="bg-background border border-border rounded-lg px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
-          >
-            <option value="paper">Paper</option>
-            <option value="live">Live</option>
-          </select>
-          <button
-            onClick={testConnection}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              connectionStatus === 'connected' || connectionStatus === 'authenticated'
-                ? 'bg-negative text-white hover:bg-negative/90' 
-                : 'bg-primary text-white hover:bg-primary/90'
-            }`}
-          >
-            {connectionStatus === 'connected' || connectionStatus === 'authenticated' ? 'Disconnect' : 'Test Connection'}
-          </button>
-        </div>
+        <button
+          onClick={testConnection}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+            connectionStatus === 'connected' || connectionStatus === 'authenticated'
+              ? 'bg-negative text-white hover:bg-negative/90' 
+              : 'bg-primary text-white hover:bg-primary/90'
+          }`}
+        >
+          {connectionStatus === 'connected' || connectionStatus === 'authenticated' ? 'Disconnect' : 'Test Connection'}
+        </button>
       </div>
 
       {/* Private Channel Authentication Toggle */}
@@ -569,7 +549,7 @@ export default function WebSocketConfigPanel() {
               onChange={(e) => { setReconnectDelay(e.target.value); setSaved(false); }}
               className="w-full bg-background border border-border rounded-lg px-2.5 py-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             >
-              {RECONNECT_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+              {['1s', '3s', '5s', '10s'].map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           </div>
           <div>
@@ -579,7 +559,7 @@ export default function WebSocketConfigPanel() {
               onChange={(e) => { setPingInterval(e.target.value); setSaved(false); }}
               className="w-full bg-background border border-border rounded-lg px-2.5 py-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
             >
-              {PING_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+              {['10s', '20s', '30s'].map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           </div>
           <div>
