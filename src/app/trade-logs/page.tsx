@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
+import { realtimeManager } from '@/lib/realtimeManager';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
 import { calculateLivePnl, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
@@ -439,74 +440,19 @@ export default function TradeLogsPage() {
   }, [hasValidCredentials]);
 
   // Connect WebSocket
-  const connectWebSocket = useCallback(() => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus('connected');
-        setError(null);
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ op: 'ping' }));
-          }
-        }, 30000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            fetchTradeData();
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = () => {
-        setConnectionStatus('error');
-      };
-
-      ws.onclose = () => {
-        setConnectionStatus('disconnected');
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-          heartbeatIntervalRef.current = null;
-        }
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      setConnectionStatus('error');
-    }
+  // Use singleton realtime manager for ticks to avoid multiple WS connections
+  useEffect(() => {
+    setConnectionStatus('connecting');
+    const unsubscribe = realtimeManager.subscribeTicks(() => {
+      // On any tick, refresh local trade data (debounced by fetchTradeData as needed)
+      fetchTradeData();
+    });
+    setConnectionStatus('connected');
+    return () => { unsubscribe(); };
   }, [fetchTradeData]);
 
   const disconnectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
+    // no-op: realtimeManager controls websocket lifecycle
   }, []);
 
   // Execute trade

@@ -6,6 +6,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { requestManager } from '@/lib/requestManager';
 import { logger } from '@/lib/logger';
+import { realtimeManager } from '@/lib/realtimeManager';
 
 export interface RealtimeData {
   balance: {
@@ -50,62 +51,37 @@ export function useRealtimeData(options: UseRealtimeDataOptions = {}) {
   const [data, setData] = useState<RealtimeData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isMountedRef = useRef(true);
+  const unsubscribeRef = useRef<() => void | null>(null);
 
   const fetchRealtimeData = useCallback(async () => {
     if (!enabled || !isMountedRef.current) return;
-
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
+      // Let the singleton manager do the heavy work and subscribe for one-off data
+      realtimeManager.triggerRefresh();
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setError(error);
+      if (onError) onError(error);
+    } finally {
+      if (isMountedRef.current) setLoading(false);
+    }
+  }, [enabled, onError]);
 
-      // Fetch all data in parallel
-      const [walletResponse, positionsResponse, ordersResponse] = await Promise.allSettled([
-        requestManager.executeWithRateLimit<any>('/api/bybit', {
-          method: 'POST',
-          body: JSON.stringify({
-            endpoint: '/v5/account/wallet-balance',
-            method: 'GET',
-          }),
-        }),
-        requestManager.executeWithRateLimit<any>('/api/bybit', {
-          method: 'POST',
-          body: JSON.stringify({
-            endpoint: '/v5/position/list',
-            method: 'GET',
-          }),
-        }),
-        requestManager.executeWithRateLimit<any>('/api/bybit', {
-          method: 'POST',
-          body: JSON.stringify({
-            endpoint: '/v5/order/realtime',
-            method: 'GET',
-          }),
-        }),
-      ]);
 
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    if (!enabled) return;
+
+    // Subscribe to manager data updates
+    const unsubscribeData = realtimeManager.subscribeData((payload) => {
       if (!isMountedRef.current) return;
-
-      const walletData = walletResponse.status === 'fulfilled' ? walletResponse.value : null;
-      const positionsData = positionsResponse.status === 'fulfilled' ? positionsResponse.value : null;
-      const ordersData = ordersResponse.status === 'fulfilled' ? ordersResponse.value : null;
-
-      // Extract wallet balance
-      const walletBalance = walletData?.result?.list?.[0] || {
-        totalEquity: '0',
-        availableBalance: '0',
-        totalMarginBalance: '0',
-        accountIMRate: '0',
-        totalInitialMargin: '0',
-        totalAvailableBalance: '0',
-      };
-
-      // Extract positions
-      const positions = positionsData?.result?.list || [];
-
-      // Extract open orders
-      const openOrders = ordersData?.result?.list || [];
+      const walletBalance = payload.wallet?.result?.list?.[0] || {};
+      const positions = payload.positions?.result?.list || [];
+      const openOrders = payload.orders?.result?.list || [];
 
       setData({
         balance: {
@@ -118,59 +94,24 @@ export function useRealtimeData(options: UseRealtimeDataOptions = {}) {
         },
         positions,
         openOrders,
-        lastUpdate: Date.now(),
+        lastUpdate: payload.lastUpdate || Date.now(),
       });
+    });
 
-      logger.debug('RealtimeData', 'Data updated successfully', {
-        equity: walletBalance.totalEquity,
-        positionCount: positions.length,
-        orderCount: openOrders.length,
-      });
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      logger.error('RealtimeData', 'Failed to fetch realtime data', { error: error.message }, error);
-      setError(error);
-      if (onError) {
-        onError(error);
-      }
-    } finally {
-      if (isMountedRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [enabled, onError]);
+    unsubscribeRef.current = unsubscribeData;
 
-  const startPolling = useCallback(() => {
-    if (!enabled) return;
+    // Also subscribe to tick messages if consumer wants to react to ticks
+    const unsubscribeTicks = realtimeManager.subscribeTicks((tick) => {
+      // noop here — pages/components may use their own tick subscriptions
+    });
 
-    // Initial fetch
-    fetchRealtimeData();
-
-    // Set up polling
-    pollTimeoutRef.current = setInterval(fetchRealtimeData, pollInterval);
-  }, [enabled, fetchRealtimeData, pollInterval]);
-
-  const stopPolling = useCallback(() => {
-    if (pollTimeoutRef.current) {
-      clearInterval(pollTimeoutRef.current);
-      pollTimeoutRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-
-    if (enabled) {
-      startPolling();
-    } else {
-      stopPolling();
-    }
-
+    // cleanup
     return () => {
       isMountedRef.current = false;
-      stopPolling();
+      unsubscribeData();
+      unsubscribeTicks();
     };
-  }, [enabled, startPolling, stopPolling]);
+  }, [enabled]);
 
   return {
     data,

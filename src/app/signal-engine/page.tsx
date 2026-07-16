@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
+import { realtimeManager } from '@/lib/realtimeManager';
 import { BYBIT_BASE_URL, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
 import { appendSharedAlert, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
@@ -371,85 +372,30 @@ export default function SignalEnginePage() {
   }, []);
 
   // Connect WebSocket
-  const connectWebSocket = useCallback(() => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus('connected');
-        setError(null);
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ op: 'ping' }));
+  // Use singleton realtime manager for ticks to avoid multiple WS connections
+  useEffect(() => {
+    setConnectionStatus('connecting');
+    const unsubscribe = realtimeManager.subscribeTicks((tick: any) => {
+      try {
+        const ticker = tick;
+        if (ticker && ticker.symbol) {
+          setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
+          const now = Date.now();
+          if (now - lastScanRef.current >= MIN_RESCAN_INTERVAL_MS) {
+            fetchMarketDataAndGenerateSignals();
           }
-        }, 30000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            const ticker = data.data;
-            if (ticker && ticker.symbol) {
-              setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
-
-              // Throttle: only trigger a full rescan if enough time has
-              // passed since the last one. Ticker ticks can arrive far more
-              // often than that across 15 subscribed symbols.
-              const now = Date.now();
-              if (now - lastScanRef.current >= MIN_RESCAN_INTERVAL_MS) {
-                fetchMarketDataAndGenerateSignals();
-              }
-            }
-          }
-        } catch (err) {
-          // Ignore
         }
-      };
-
-      ws.onerror = () => {
-        setConnectionStatus('error');
-      };
-
-      ws.onclose = () => {
-        setConnectionStatus('disconnected');
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-          heartbeatIntervalRef.current = null;
-        }
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      setConnectionStatus('error');
-    }
+      } catch (e) {
+        // ignore
+      }
+    });
+    // Mark connected once manager is running (manager logs/handles WS lifecycle)
+    setConnectionStatus('connected');
+    return () => { unsubscribe(); };
   }, [fetchMarketDataAndGenerateSignals]);
 
   const disconnectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
+    // no-op: singleton manager controls lifecycle
   }, []);
 
   // Initialize — runs once on mount. connectionStatus is intentionally
@@ -475,22 +421,15 @@ export default function SignalEnginePage() {
     window.addEventListener('auto-trading-settings-changed', handleAutoTradingSettingChanged);
 
     fetchMarketDataAndGenerateSignals();
-    connectWebSocket();
 
     const interval = setInterval(() => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        fetchMarketDataAndGenerateSignals();
-      }
-    }, 120000); // Rescan every 2 minutes if the socket isn't delivering ticks
+      // rely on singleton manager; still fallback to periodic rescan
+      fetchMarketDataAndGenerateSignals();
+    }, 120000);
 
     return () => {
       clearInterval(interval);
-      disconnectWebSocket();
       window.removeEventListener('auto-trading-settings-changed', handleAutoTradingSettingChanged);
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = null;
-      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
