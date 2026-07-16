@@ -85,6 +85,24 @@ const formatPrice = (price: number): string => {
   return price.toFixed(6);
 };
 
+const calculateTradePnl = (trade: any, currentPrice: number | null) => {
+  const entryPrice = parseFloat(trade.entryPrice || 0);
+  const size = parseFloat(trade.size || 0.001);
+
+  if (!currentPrice || !entryPrice || !size) {
+    return { pnl: parseFloat(trade.pnl || 0), pnlPct: parseFloat(trade.pnlPct || 0) };
+  }
+
+  const move = trade.side === 'LONG' ? currentPrice - entryPrice : entryPrice - currentPrice;
+  const pnl = move * size;
+  const pnlPct = entryPrice > 0 ? (pnl / (entryPrice * size)) * 100 : 0;
+
+  return {
+    pnl: Math.round(pnl * 100) / 100,
+    pnlPct: Math.round(pnlPct * 10) / 10,
+  };
+};
+
 // ============== API FUNCTIONS ==============
 
 // Fetch positions
@@ -381,48 +399,52 @@ export default function TradeLogsPage() {
       const hasKeys = hasValidCredentials();
       const paperTrades = readPaperTrades();
       const localLiveTrades = readLiveTrades();
+      const allSymbols = Array.from(new Set(
+        [...paperTrades, ...localLiveTrades]
+          .map((trade: any) => trade.symbol)
+          .filter(Boolean)
+      ));
+      const tickerData = await fetchTickers(allSymbols);
 
-      const paperEntries = await Promise.all(
-        paperTrades.map(async (trade: any) => {
-          const currentPrice = await getCurrentPrice(trade.symbol);
-          const entryPrice = parseFloat(trade.entryPrice || 0);
-          const size = parseFloat(trade.size || 0.001);
-          let pnl = 0;
-          let pnlPct = 0;
+      const paperEntries = paperTrades.map((trade: any) => {
+        const currentPrice = trade.symbol ? parseFloat(tickerData[trade.symbol]?.lastPrice || '0') : null;
+        const { pnl, pnlPct } = calculateTradePnl(trade, currentPrice);
 
-          if (currentPrice && entryPrice) {
-            const move = trade.side === 'LONG' ? currentPrice - entryPrice : entryPrice - currentPrice;
-            pnl = move * size;
-            pnlPct = entryPrice > 0 ? (pnl / (entryPrice * size)) * 100 : 0;
-          }
+        return {
+          ...trade,
+          entryPrice: parseFloat(trade.entryPrice || 0),
+          exitPrice: parseFloat(trade.exitPrice || trade.entryPrice || 0),
+          size: parseFloat(trade.size || 0.001),
+          pnl,
+          pnlPct,
+          status: trade.status || 'open',
+          entryTimestamp: trade.entryTimestamp || Date.now(),
+          exitTimestamp: trade.exitTimestamp || Date.now(),
+          source: 'paper',
+        } as Trade;
+      });
 
-          return {
-            ...trade,
-            entryPrice: parseFloat(trade.entryPrice || 0),
-            exitPrice: parseFloat(trade.exitPrice || trade.entryPrice || 0),
-            size: parseFloat(trade.size || 0.001),
-            pnl: Math.round(pnl * 100) / 100,
-            pnlPct: Math.round(pnlPct * 10) / 10,
-            status: trade.status || 'open',
-            entryTimestamp: trade.entryTimestamp || Date.now(),
-            exitTimestamp: trade.exitTimestamp || Date.now(),
-            source: 'paper',
-          } as Trade;
-        })
-      );
+      const liveEntries = localLiveTrades.map((trade: any) => {
+        const currentPrice = trade.symbol ? parseFloat(tickerData[trade.symbol]?.lastPrice || '0') : null;
+        const { pnl, pnlPct } = calculateTradePnl(trade, currentPrice);
 
-      const liveEntries = localLiveTrades.map((trade: any) => ({
-        ...trade,
-        entryPrice: parseFloat(trade.entryPrice || 0),
-        exitPrice: parseFloat(trade.exitPrice || trade.entryPrice || 0),
-        size: parseFloat(trade.size || 0.001),
-        pnl: parseFloat(trade.pnl || 0),
-        pnlPct: parseFloat(trade.pnlPct || 0),
-        status: trade.status || 'open',
-        entryTimestamp: trade.entryTimestamp || Date.now(),
-        exitTimestamp: trade.exitTimestamp || Date.now(),
-        source: 'live',
-      } as Trade));
+        return {
+          ...trade,
+          entryPrice: parseFloat(trade.entryPrice || 0),
+          exitPrice: parseFloat(trade.exitPrice || trade.entryPrice || 0),
+          size: parseFloat(trade.size || 0.001),
+          pnl,
+          pnlPct,
+          status: trade.status || 'open',
+          entryTimestamp: trade.entryTimestamp || Date.now(),
+          exitTimestamp: trade.exitTimestamp || Date.now(),
+          source: 'live',
+        } as Trade;
+      });
+
+      if (typeof window !== 'undefined' && liveEntries.length > 0) {
+        window.localStorage.setItem('live_trades', JSON.stringify(liveEntries));
+      }
 
       if (!hasKeys) {
         setIsApiConnected(false);
