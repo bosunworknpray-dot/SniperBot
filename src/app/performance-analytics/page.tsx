@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 import { calculateLivePnl, getSharedTradingState, setSharedMetrics, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
@@ -170,6 +171,7 @@ const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => 
 // ============== COMPONENT ==============
 
 export default function PerformanceAnalyticsPage() {
+  const { data: realtimeData } = useSharedRealtimeData();
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting' | 'error'>('connecting');
@@ -324,7 +326,9 @@ export default function PerformanceAnalyticsPage() {
         fetchTickers(SUPPORTED_SYMBOLS),
       ]);
 
-      const currentEquity = wallet.totalEquity;
+      const currentEquity = realtimeData?.balance?.totalEquity > 0
+        ? realtimeData.balance.totalEquity
+        : wallet.totalEquity;
       const baseEquityValue = 100; // Starting equity
       
       setBaseEquity(baseEquityValue);
@@ -350,7 +354,7 @@ export default function PerformanceAnalyticsPage() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [hasValidCredentials]);
+  }, [hasValidCredentials, realtimeData]);
 
   const disconnectWebSocket = useCallback(() => { /* noop - singleton manages WS */ }, []);
   const lastAnalyticsRefreshRef = useRef<number>(0);
@@ -473,6 +477,14 @@ export default function PerformanceAnalyticsPage() {
                 Total P&L: {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
               </span>
             </div>
+            {realtimeData?.balance?.totalEquity > 0 && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
+                <Wallet size={14} className="text-blue-600 dark:text-blue-400" />
+                <span className="text-xs font-medium text-blue-700 dark:text-blue-400">
+                  Account Equity: ${realtimeData.balance.totalEquity.toFixed(2)}
+                </span>
+              </div>
+            )}
             <button 
               onClick={handleRefresh} 
               disabled={isRefreshing}
