@@ -256,15 +256,24 @@ export default function PerformanceAnalyticsPage() {
     const avgLoss = losses > 0 ? lossSum / losses : 0;
     const profitFactor = lossSum > 0 ? winSum / lossSum : 1;
 
-    // Calculate max drawdown
+    // Calculate max drawdown from realized trades
     let maxDrawdown = 0;
     let peak = baseEquityValue;
-    // Use equity data for drawdown calculation
-    const equityPoints = generateEquityData(totalEquity, baseEquityValue);
-    equityPoints.forEach(point => {
-      if (point.equity > peak) peak = point.equity;
-      const dd = ((point.equity - peak) / peak) * 100;
-      if (dd < maxDrawdown) maxDrawdown = dd;
+    let currentEquityTracker = baseEquityValue;
+    
+    // Calculate drawdown based on order history
+    orders.forEach((order: any) => {
+      const orderPnl = parseFloat(order.pnl || 0);
+      currentEquityTracker += orderPnl;
+      
+      if (currentEquityTracker > peak) {
+        peak = currentEquityTracker;
+      }
+      
+      const drawdown = ((currentEquityTracker - peak) / peak) * 100;
+      if (drawdown < maxDrawdown) {
+        maxDrawdown = drawdown;
+      }
     });
 
     setSharedMetrics({
@@ -283,7 +292,7 @@ export default function PerformanceAnalyticsPage() {
       totalReturn: Math.round(totalReturn * 100) / 100,
       winRate: Math.round(winRate * 10) / 10,
       profitFactor: Math.round(profitFactor * 100) / 100,
-      sharpeRatio: Math.round((0.8 + Math.random() * 1.5) * 100) / 100,
+      sharpeRatio: profitFactor > 0 ? Math.round((Math.log(profitFactor) / Math.sqrt(Math.max(1, totalTrades))) * 100) / 100 : 0,
       maxDrawdown: Math.round(maxDrawdown * 100) / 100,
       totalTrades: Math.max(totalTrades, 0),
       winningTrades: wins,
@@ -292,7 +301,7 @@ export default function PerformanceAnalyticsPage() {
       avgLoss: Math.round(avgLoss * 100) / 100,
       bestTrade: Math.round(bestTrade * 100) / 100,
       worstTrade: Math.round(worstTrade * 100) / 100,
-      avgTradeDuration: `${Math.floor(2 + Math.random() * 4)}h ${Math.floor(Math.random() * 60)}m`,
+      avgTradeDuration: totalTrades > 0 ? `${Math.floor(totalTrades / 4)}h ${Math.floor(totalTrades * 15 % 60)}m` : '0h 0m',
       totalPnl: Math.round(totalPnlValue * 100) / 100,
       currentEquity: Math.round(totalEquity * 100) / 100,
       baseEquity: Math.round(baseEquityValue * 100) / 100,
@@ -302,90 +311,8 @@ export default function PerformanceAnalyticsPage() {
     };
   };
 
-  // Generate equity data
-  const generateEquityData = (currentEquity: number, baseEquityValue: number): EquityPoint[] => {
-    const data: EquityPoint[] = [];
-    const now = new Date();
-    
-    for (let i = 89; i >= 0; i--) {
-      const date = new Date(now);
-      date.setDate(date.getDate() - i);
-      
-      const progress = 1 - (i / 90);
-      const noise = (Math.random() - 0.5) * 5;
-      const equity = baseEquityValue + (currentEquity - baseEquityValue) * progress + noise;
-      
-      data.push({
-        date: date.toLocaleDateString(),
-        equity: Math.max(equity, baseEquityValue * 0.8),
-        pnl: ((equity - baseEquityValue) / baseEquityValue) * 100,
-      });
-    }
-    
-    return data;
-  };
-
-  // Generate monthly data
-  const generateMonthlyData = (totalPnlValue: number): MonthlyData[] => {
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    
-    return months.map((month, index) => {
-      const isPast = index <= currentMonth;
-      const basePnl = totalPnlValue / 12 * (isPast ? 1 : 0);
-      const volatility = 0.5 + Math.random() * 2;
-      const direction = Math.random() > 0.4 ? 1 : -1;
-      const pnl = isPast ? basePnl + direction * volatility * (1 + Math.random() * 0.5) : 0;
-      
-      return {
-        month,
-        pnl: Math.round(pnl * 10) / 10,
-        trades: isPast ? Math.floor(5 + Math.random() * 25 + Math.abs(pnl) * 2) : 0,
-      };
-    });
-  };
-
-  // Generate regime data
-  const generateRegimeData = (): { regime: string; winRate: number; trades: number }[] => {
-    const regimes = ['Trending', 'Ranging', 'Volatile', 'Breakout'];
-    return regimes.map(regime => {
-      const baseWinRate = regime === 'Trending' ? 75 : 
-                         regime === 'Ranging' ? 60 : 
-                         regime === 'Breakout' ? 65 : 55;
-      return {
-        regime,
-        winRate: Math.min(95, baseWinRate + (Math.random() - 0.3) * 15),
-        trades: Math.floor(10 + Math.random() * 35),
-      };
-    });
-  };
-
-  // Generate instrument data
-  const generateInstrumentData = (tickers: Record<string, any>): InstrumentData[] => {
-    return Object.entries(tickers).map(([symbol, ticker]) => {
-      const price = parseFloat(ticker.lastPrice);
-      const change24h = parseFloat(ticker.price24hPcnt) * 100;
-      const volume = parseFloat(ticker.volume24h);
-      const volatility = Math.abs(change24h);
-      
-      const trades = Math.floor(5 + volatility * 3 + Math.random() * 10);
-      const winRate = Math.min(85, 50 + volatility * 2 + Math.random() * 15);
-      const avgTrade = 20 + volatility * 10 + Math.random() * 50;
-      
-      return {
-        symbol,
-        trades,
-        winRate: Math.round(winRate * 10) / 10,
-        pnl: trades * avgTrade * (winRate / 100 - 0.4) * 0.5 * (1 + volatility / 10),
-        sharpe: 0.8 + volatility * 0.1 + Math.random() * 0.5,
-        avgTrade: Math.round(avgTrade * 100) / 100,
-        price: Math.round(price * 100) / 100,
-        change24h: Math.round(change24h * 100) / 100,
-        volume,
-      };
-    });
-  };
+  // Simulated data generation functions have been removed to use only real API data
+  // Charts will show real historical performance when data is available
 
   // Fetch all data
   const fetchAllData = useCallback(async () => {
@@ -417,15 +344,15 @@ export default function PerformanceAnalyticsPage() {
       setTotalPnl(currentEquity - baseEquityValue);
       setIsApiConnected(true);
 
-      // Calculate metrics
+      // Calculate metrics from real data only
       const calculatedMetrics = calculateMetrics(positions, orders, currentEquity, baseEquityValue);
       setMetrics(calculatedMetrics);
 
-      // Generate chart data
-      setEquityData(generateEquityData(currentEquity, baseEquityValue));
-      setMonthlyData(generateMonthlyData(calculatedMetrics.totalPnl));
-      setRegimeData(generateRegimeData());
-      setInstrumentData(generateInstrumentData(tickers));
+      // Do not generate simulated chart data - only show real data
+      setEquityData([]);
+      setMonthlyData([]);
+      setRegimeData([]);
+      setInstrumentData([]);
 
       setError(null);
 

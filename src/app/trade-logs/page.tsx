@@ -427,7 +427,7 @@ export default function TradeLogsPage() {
       setPositions(livePositions as any);
       setTrades(mergedTrades);
       setSharedTrades('paper', paperTrades as any);
-      setSharedTrades('live', liveTrades as any);
+      setSharedTrades('live', liveEntries as any);
       setIsApiConnected(true);
       setLastUpdate(new Date());
 
@@ -1010,11 +1010,11 @@ export default function TradeLogsPage() {
                       {trade.exitPrice ? `$${formatPrice(trade.exitPrice)}` : '-'}
                     </td>
                     <td className={`px-3 py-2.5 font-mono text-xs font-bold ${
-                      trade.pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                      (trade.pnl ?? 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
                     }`}>
-                      {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
+                      {(trade.pnl ?? 0) >= 0 ? '+' : ''}${(trade.pnl ?? 0).toFixed(2)}
                       <span className="text-[10px] ml-1 opacity-70">
-                        ({trade.pnlPct >= 0 ? '+' : ''}{trade.pnlPct.toFixed(1)}%)
+                        ({(trade.pnlPct ?? 0) >= 0 ? '+' : ''}{(trade.pnlPct ?? 0).toFixed(1)}%)
                       </span>
                     </td>
                     <td className="px-3 py-2.5">

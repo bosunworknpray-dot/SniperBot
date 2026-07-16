@@ -35,7 +35,6 @@ const navItems: NavItem[] = [
   { path: '/performance-analytics', label: 'Analytics', icon: <BarChart3 size={18} /> },
   { path: '/trade-logs', label: 'Trade Logs', icon: <FileText size={18} /> },
   { path: '/signal-engine', label: 'Signal Engine', icon: <Zap size={18} /> },
-  { path: '/bot-config', label: 'Bot Config', icon: <Bot size={18} /> },
   { path: '/risk-rules', label: 'Risk Rules', icon: <Shield size={18} /> },
   { path: '/alerts', label: 'Alerts', icon: <Bell size={18} /> },
   { path: '/settings', label: 'Settings', icon: <Settings size={18} /> },

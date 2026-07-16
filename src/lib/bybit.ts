@@ -165,6 +165,7 @@ export async function placeBybitOrder(options: {
     orderType: 'Market',
     qty: qty.toString(),
     timeInForce: 'GTC',
+    accountType: 'UNIFIED',
     ...(typeof positionIdx === 'number' ? { positionIdx } : {}),
   };
   // Include TP/SL when provided
