@@ -23,9 +23,9 @@ class AutoExecutor {
 
   constructor() {
     this.config = {
-      minConfidence: parseFloat(process.env.AUTO_EXECUTE_MIN_CONFIDENCE || '0.80'),
-      maxRiskPct: parseFloat(process.env.AUTO_EXECUTE_MAX_RISK_PCT || '2.0'),
-      enabled: process.env.AUTO_EXECUTE_ENABLED === 'true',
+      minConfidence: parseFloat(process.env.NEXT_PUBLIC_AUTO_EXECUTE_MIN_CONFIDENCE || process.env.AUTO_EXECUTE_MIN_CONFIDENCE || '0.80'),
+      maxRiskPct: parseFloat(process.env.NEXT_PUBLIC_AUTO_EXECUTE_MAX_RISK_PCT || process.env.AUTO_EXECUTE_MAX_RISK_PCT || '2.0'),
+      enabled: (process.env.NEXT_PUBLIC_AUTO_EXECUTE === 'true') || (process.env.AUTO_EXECUTE_ENABLED === 'true'),
     };
 
     logger.info('AutoExecutor', 'Initialized', this.config);
@@ -34,8 +34,13 @@ class AutoExecutor {
   start() {
     if (this.isRunning) return;
 
+    if (!this.config.enabled) {
+      logger.info('AutoExecutor', 'Auto-executor is disabled by configuration; not starting');
+      return;
+    }
+
     this.isRunning = true;
-    const intervalMs = parseInt(process.env.SIGNAL_CHECK_INTERVAL_MS || '1000');
+    const intervalMs = parseInt(process.env.NEXT_PUBLIC_SIGNAL_CHECK_INTERVAL_MS || process.env.SIGNAL_CHECK_INTERVAL_MS || '1000');
 
     logger.info('AutoExecutor', 'Started signal monitoring', { intervalMs, config: this.config });
 
