@@ -154,7 +154,7 @@ export default function SignalEnginePage() {
     const unsubscribe = subscribeToSharedTradingState((state) => {
       setSignals(state.signals);
     });
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
 
   const wsRef = useRef<WebSocket | null>(null);

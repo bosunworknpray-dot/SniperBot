@@ -97,7 +97,7 @@ export default function LiveMetricCards() {
 
   useEffect(() => {
     const unsub = subscribeToSharedTradingState((s) => setSharedState(s));
-    return unsub;
+    return () => unsub();
   }, []);
 
   // Calculate metrics from real-time data

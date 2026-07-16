@@ -312,7 +312,7 @@ export default function TradeLogsPage() {
       const merged = [...state.trades.paper, ...state.trades.live];
       setTrades(merged as any);
     });
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);

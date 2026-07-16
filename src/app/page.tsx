@@ -462,7 +462,7 @@ export default function Home() {
       setBaseEquity(state.balance.baseEquity);
       setPaperEquity(state.balance.totalEquity);
     });
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
 
   // Sync real-time data from context

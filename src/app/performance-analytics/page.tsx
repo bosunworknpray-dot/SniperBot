@@ -197,7 +197,7 @@ export default function PerformanceAnalyticsPage() {
       setTotalPnl(state.metrics.totalPnl);
       setMetrics(prev => prev ? ({ ...prev, totalPnl: state.metrics.totalPnl, dailyPnl: state.metrics.dailyPnl, totalTrades: state.metrics.totalTrades, winRate: state.metrics.winRate }) : prev);
     });
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
 
   // Calculate performance metrics from real data

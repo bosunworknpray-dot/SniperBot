@@ -96,14 +96,14 @@ const fetchWalletBalance = async (): Promise<{ totalEquity: number; availableBal
   try {
     const { apiKey, apiSecret } = getApiCredentials();
     if (!apiKey || !apiSecret) {
-      return { totalEquity: 100, availableBalance: 100 };
+      return { totalEquity: 0, availableBalance: 0 };
     }
 
     const recvWindow = '5000';
-    const params = '';
+    const params = 'accountType=UNIFIED';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance?${params}`, {
       method: 'GET',
       headers,
     });
@@ -111,15 +111,18 @@ const fetchWalletBalance = async (): Promise<{ totalEquity: number; availableBal
     const data = await safeJsonParse(response);
     if (data?.retCode === 0 && data?.result?.list?.[0]) {
       const wallet = data.result.list[0];
+      const totalEquity = parseFloat(wallet.totalEquity || wallet.equity || '0');
+      const availableBalance = parseFloat(wallet.availableBalance || wallet.available || wallet.totalAvailableBalance || '0');
       return {
-        totalEquity: parseFloat(wallet.totalEquity || '100'),
-        availableBalance: parseFloat(wallet.availableBalance || '100'),
+        totalEquity: Number.isFinite(totalEquity) ? totalEquity : 0,
+        availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
       };
     }
-    return { totalEquity: 100, availableBalance: 100 };
+
+    return { totalEquity: 0, availableBalance: 0 };
   } catch (error) {
     console.error('Error fetching wallet balance:', error);
-    return { totalEquity: 100, availableBalance: 100 };
+    return { totalEquity: 0, availableBalance: 0 };
   }
 };
 
@@ -198,8 +201,8 @@ export default function RiskRulesPage() {
     riskScore: 'Low',
     maxLossPerTrade: 0,
     dailyLossLimit: 0,
-    totalEquity: 100,
-    availableBalance: 100,
+    totalEquity: 0,
+    availableBalance: 0,
   });
   const [marketData, setMarketData] = useState<Record<string, any>>({});
 
@@ -260,7 +263,9 @@ export default function RiskRulesPage() {
         const positionValue = entryPrice * Math.abs(size);
         
         totalPnL += pnl;
-        totalExposure += (positionValue * leverage) / totalEquity * 100;
+        if (totalEquity > 0) {
+          totalExposure += (positionValue * leverage) / totalEquity * 100;
+        }
         
         // Check correlation (simplified)
         const change24h = tickers[pos.symbol] ? parseFloat(tickers[pos.symbol].price24hPcnt) * 100 : 0;
@@ -270,7 +275,7 @@ export default function RiskRulesPage() {
       });
 
       // Calculate drawdown
-      const dailyLossPct = Math.min(100, Math.abs(totalPnL) / totalEquity * 100);
+      const dailyLossPct = totalEquity > 0 ? Math.min(100, Math.abs(totalPnL) / totalEquity * 100) : 0;
       const weeklyDrawdown = Math.min(15, dailyLossPct * 1.5 + Math.random() * 2);
       const monthlyDrawdown = Math.min(25, dailyLossPct * 2 + Math.random() * 3);
 
