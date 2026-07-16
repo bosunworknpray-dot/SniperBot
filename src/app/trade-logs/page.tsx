@@ -499,7 +499,6 @@ export default function TradeLogsPage() {
   // Initialize
   useEffect(() => {
     fetchTradeData();
-    connectWebSocket();
 
     const handleTradeUpdate = () => {
       fetchTradeData();
@@ -508,21 +507,19 @@ export default function TradeLogsPage() {
     window.addEventListener('bybit-trades-updated', handleTradeUpdate);
 
     const interval = setInterval(() => {
-      if (connectionStatus === 'disconnected') {
-        fetchTradeData();
-      }
+      // fallback periodic refresh
+      fetchTradeData();
     }, 60000);
 
     return () => {
       clearInterval(interval);
-      disconnectWebSocket();
       window.removeEventListener('bybit-trades-updated', handleTradeUpdate);
       if (heartbeatIntervalRef.current) {
         clearInterval(heartbeatIntervalRef.current);
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchTradeData, connectWebSocket, disconnectWebSocket, connectionStatus]);
+  }, [fetchTradeData]);
 
   // Export trades
   const handleExport = () => {
@@ -666,7 +663,7 @@ export default function TradeLogsPage() {
               </span>
               {connectionStatus === 'error' && (
                 <button
-                  onClick={() => { disconnectWebSocket(); setTimeout(connectWebSocket, 1000); }}
+                  onClick={() => { realtimeManager.triggerRefresh(); }}
                   className="ml-1 text-blue-600 dark:text-blue-400 hover:underline"
                 >
                   Reconnect

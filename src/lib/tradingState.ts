@@ -123,7 +123,7 @@ const listeners = new Set<(state: SharedTradingState) => void>();
 
 const defaultBotState: SharedBotState = {
   isRunning: false,
-  mode: 'paper',
+  mode: 'live',
   status: 'idle',
   lastAction: 'Waiting...',
   lastActionTime: '',

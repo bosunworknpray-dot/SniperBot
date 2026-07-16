@@ -834,6 +834,17 @@ export default function Home() {
     addAlert('system', 'medium', '🤖 Bot Started', 'Trading bot has been activated');
   };
 
+  // Persist auto-trading setting and notify signal engine when bot starts
+  const handleStartBotExtended = () => {
+    // enable auto-trading when bot starts
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('auto_trading_enabled', 'true');
+      window.dispatchEvent(new CustomEvent('auto-trading-settings-changed', { detail: { enabled: true } }));
+      window.dispatchEvent(new CustomEvent('bot-started', { detail: {} }));
+    }
+    handleStartBot();
+  };
+
   const handleStopBot = () => {
     const nextBotState = {
       isRunning: false,
@@ -849,13 +860,10 @@ export default function Home() {
   };
 
   const handleToggleMode = () => {
-    const newMode = botStatus.mode === 'paper' ? 'live' : 'paper';
-    if (newMode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE mode will use real funds. Are you sure?')) {
-      return;
-    }
+    // Force mode to 'live' only — paper mode removed from dashboard
     const nextBotState = {
-      mode: newMode,
-      lastAction: `Switched to ${newMode} mode`,
+      mode: 'live',
+      lastAction: `Switched to live mode`,
       lastActionTime: new Date().toLocaleTimeString(),
     };
     setBotStatus(prev => ({ ...prev, ...nextBotState }));
@@ -1264,7 +1272,7 @@ export default function Home() {
                     </button>
                   ) : (
                     <button
-                      onClick={handleStartBot}
+                      onClick={handleStartBotExtended}
                       className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                     >
                       <Play size={14} />

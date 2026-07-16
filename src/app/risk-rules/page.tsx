@@ -10,6 +10,7 @@ import {
   Info, Zap, TrendingDown, Settings, Lock, Unlock,
   Clock, Database, Loader2, Wifi, WifiOff, X
 } from 'lucide-react';
+import { realtimeManager } from '@/lib/realtimeManager';
 
 interface RiskRules {
   perTradeRisk: number;
@@ -307,85 +308,19 @@ export default function RiskRulesPage() {
     }
   }, [rules.perTradeRisk, rules.maxDailyLoss]);
 
-  // Connect WebSocket
-  const connectWebSocket = useCallback(() => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus('connected');
-        setError(null);
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ op: 'ping' }));
-          }
-        }, 30000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            const ticker = data.data;
-            if (ticker && ticker.symbol) {
-              setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
-              fetchMarketDataAndAssessRisk();
-            }
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = () => {
-        setConnectionStatus('error');
-      };
-
-      ws.onclose = () => {
-        setConnectionStatus('disconnected');
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-          heartbeatIntervalRef.current = null;
-        }
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      setConnectionStatus('error');
-    }
-  }, [fetchMarketDataAndAssessRisk]);
-
-  const disconnectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  }, []);
+  const disconnectWebSocket = useCallback(() => { /* noop - singleton handles websocket */ }, []);
 
   // Initialize
   useEffect(() => {
     fetchMarketDataAndAssessRisk();
-    connectWebSocket();
+    const unsubscribe = realtimeManager.subscribeTicks((ticker: any) => {
+      try {
+        if (ticker && ticker.symbol) {
+          setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
+          fetchMarketDataAndAssessRisk();
+        }
+      } catch (e) { /* ignore */ }
+    });
 
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
@@ -395,13 +330,9 @@ export default function RiskRulesPage() {
 
     return () => {
       clearInterval(interval);
-      disconnectWebSocket();
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = null;
-      }
+      unsubscribe();
     };
-  }, [fetchMarketDataAndAssessRisk, connectWebSocket, disconnectWebSocket]);
+  }, [fetchMarketDataAndAssessRisk]);
 
   // Save rules
   const handleSave = () => {

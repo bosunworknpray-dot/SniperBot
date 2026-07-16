@@ -422,6 +422,12 @@ export default function SignalEnginePage() {
 
     fetchMarketDataAndGenerateSignals();
 
+    const onBotStarted = () => {
+      // Immediately trigger a scan when the bot starts
+      fetchMarketDataAndGenerateSignals();
+    };
+    window.addEventListener('bot-started', onBotStarted);
+
     const interval = setInterval(() => {
       // rely on singleton manager; still fallback to periodic rescan
       fetchMarketDataAndGenerateSignals();
@@ -430,6 +436,7 @@ export default function SignalEnginePage() {
     return () => {
       clearInterval(interval);
       window.removeEventListener('auto-trading-settings-changed', handleAutoTradingSettingChanged);
+      window.removeEventListener('bot-started', onBotStarted);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -487,8 +494,8 @@ export default function SignalEnginePage() {
       await fetchMarketDataAndGenerateSignals();
       
       if (connectionStatus === 'disconnected' || connectionStatus === 'error') {
-        disconnectWebSocket();
-        setTimeout(connectWebSocket, 1000);
+          // Trigger singleton manager refresh instead of per-component reconnect
+          realtimeManager.triggerRefresh();
       }
     } catch (err: any) {
       setError(err.message || 'Failed to scan market');
@@ -735,7 +742,7 @@ export default function SignalEnginePage() {
           <div className="flex items-center gap-3">
             {connectionStatus === 'error' && (
               <button
-                onClick={() => { disconnectWebSocket(); setTimeout(connectWebSocket, 1000); }}
+                onClick={() => { realtimeManager.triggerRefresh(); }}
                 className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
               >
                 Reconnect

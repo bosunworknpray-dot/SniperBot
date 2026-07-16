@@ -7,6 +7,7 @@ import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
 import { appendSharedAlert, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { Bell, Check, X, Filter, Trash2, Settings, RefreshCw, Wifi, WifiOff, Loader2 } from 'lucide-react';
+import { realtimeManager } from '@/lib/realtimeManager';
 
 interface Alert {
   id: string;
@@ -301,88 +302,23 @@ export default function AlertsPage() {
     }
   }, [hasValidCredentials, notifSettings]);
 
-  // Connect WebSocket
-  const connectWebSocket = useCallback(() => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus('connected');
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ op: 'ping' }));
-          }
-        }, 30000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            const ticker = data.data;
-            if (ticker && ticker.symbol) {
-              setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
-              const alert = generateAlertFromMarketData(ticker.symbol, ticker);
-              if (alert) {
-                setAlerts(prev => [alert, ...prev].slice(0, 50));
-                setLastAlertTime(Date.now());
-              }
-            }
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = () => {
-        setConnectionStatus('error');
-      };
-
-      ws.onclose = () => {
-        setConnectionStatus('disconnected');
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-          heartbeatIntervalRef.current = null;
-        }
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      setConnectionStatus('error');
-    }
-  }, []);
-
-  const disconnectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  }, []);
+  const disconnectWebSocket = useCallback(() => { /* noop - singleton handles ws */ }, []);
 
   // Initialize
   useEffect(() => {
     fetchAlerts();
-    connectWebSocket();
+    const unsubscribe = realtimeManager.subscribeTicks((ticker: any) => {
+      try {
+        if (ticker && ticker.symbol) {
+          setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
+          const alert = generateAlertFromMarketData(ticker.symbol, ticker);
+          if (alert) {
+            setAlerts(prev => [alert, ...prev].slice(0, 50));
+            setLastAlertTime(Date.now());
+          }
+        }
+      } catch (e) { /* ignore */ }
+    });
 
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
@@ -392,13 +328,9 @@ export default function AlertsPage() {
 
     return () => {
       clearInterval(interval);
-      disconnectWebSocket();
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = null;
-      }
+      unsubscribe();
     };
-  }, [fetchAlerts, connectWebSocket, disconnectWebSocket]);
+  }, [fetchAlerts]);
 
   // Save settings to localStorage
   useEffect(() => {

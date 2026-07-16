@@ -12,6 +12,7 @@ import {
   Filter, ChevronDown, Maximize2, Loader2, Wifi, WifiOff,
   X, AlertCircle, Wallet
 } from 'lucide-react';
+import { realtimeManager } from '@/lib/realtimeManager';
 
 interface PerformanceMetrics {
   totalReturn: number;
@@ -437,81 +438,14 @@ export default function PerformanceAnalyticsPage() {
     }
   }, [hasValidCredentials]);
 
-  // Connect WebSocket
-  const connectWebSocket = useCallback(() => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus('connected');
-        setError(null);
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ op: 'ping' }));
-          }
-        }, 30000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            fetchAllData();
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = () => {
-        setConnectionStatus('error');
-      };
-
-      ws.onclose = () => {
-        setConnectionStatus('disconnected');
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-          heartbeatIntervalRef.current = null;
-        }
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      setConnectionStatus('error');
-    }
-  }, [fetchAllData]);
-
-  const disconnectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  }, []);
+  const disconnectWebSocket = useCallback(() => { /* noop - singleton manages WS */ }, []);
 
   // Initialize
   useEffect(() => {
     fetchAllData();
-    connectWebSocket();
+    const unsubscribe = realtimeManager.subscribeTicks(() => {
+      fetchAllData();
+    });
 
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
@@ -521,13 +455,9 @@ export default function PerformanceAnalyticsPage() {
 
     return () => {
       clearInterval(interval);
-      disconnectWebSocket();
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = null;
-      }
+      unsubscribe();
     };
-  }, [fetchAllData, connectWebSocket, disconnectWebSocket]);
+  }, [fetchAllData]);
 
   const handleRefresh = () => {
     setIsRefreshing(true);

@@ -143,6 +143,15 @@ class RealtimeManager {
   triggerRefresh() {
     this.fetchOnce().catch(() => {});
   }
+
+  // Expose WS connection state for health checks
+  isWsConnected() {
+    try {
+      return !!(this.ws && this.ws.readyState === WebSocket.OPEN);
+    } catch (e) {
+      return false;
+    }
+  }
 }
 
 export const realtimeManager = RealtimeManager.instance;

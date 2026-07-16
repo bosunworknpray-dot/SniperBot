@@ -3,6 +3,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { realtimeManager } from '@/lib/realtimeManager';
 import AppLayout from '@/components/AppLayout';
 import { 
   Settings, ExternalLink, Save, Key, Shield, 
@@ -640,88 +641,37 @@ const WebSocketConfigPanel = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const unsubscribeRef = useRef<() => void | null>(null);
 
   const addLog = (message: string) => {
     setLogs(prev => [...prev, `${new Date().toLocaleTimeString()}: ${message}`].slice(-20));
   };
 
   const connect = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      disconnect();
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
+      setStatus('idle');
       return;
     }
 
     setStatus('connecting');
-    setReconnectAttempts(0);
-    addLog('Connecting to WebSocket...');
+    setMessageCount(0);
+    let localCount = 0;
+    unsubscribeRef.current = realtimeManager.subscribeTicks((data: any) => {
+      localCount++;
+      setMessageCount(prev => prev + 1);
+      setStatus('connected');
+      addLog('📩 Received tick data');
+    });
 
-    try {
-      const ws = new WebSocket(config.url);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setStatus('connected');
-        setMessageCount(0);
-        setReconnectAttempts(0);
-        addLog('✅ Connected successfully');
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: ['tickers.BTCUSDT', 'tickers.ETHUSDT', 'tickers.SOLUSDT']
-        }));
-        addLog('📡 Subscribed to ticker updates');
-
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
-        }
-        heartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ op: 'ping' }));
-          }
-        }, config.heartbeatInterval);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          setMessageCount(prev => prev + 1);
-          
-          if (data.topic) {
-            addLog(`📩 Received ${data.topic} data`);
-          } else if (data.op === 'pong') {
-            // Heartbeat response
-          }
-        } catch (e) {
-          // Ignore parse errors for binary data
-        }
-      };
-
-      ws.onerror = () => {
-        console.warn('WebSocket error');
-        addLog('⚠️ WebSocket error occurred');
-      };
-
-      ws.onclose = (event) => {
-        setStatus('idle');
-        addLog('🔌 Disconnected');
-        
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        
-        if (event.code !== 1000) {
-          const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
-            addLog(`🔄 Reconnecting... (attempt ${reconnectAttempts + 1})`);
-            connect();
-          }, delay);
-        }
-      };
-    } catch (error) {
-      setStatus('error');
-      addLog('❌ Connection failed');
-    }
+    setTimeout(() => {
+      if (localCount === 0) {
+        setStatus('error');
+        addLog('⚠️ No messages received during test window');
+        if (unsubscribeRef.current) { unsubscribeRef.current(); unsubscribeRef.current = null; }
+      }
+    }, 3000);
   };
 
   const disconnect = () => {
@@ -733,9 +683,9 @@ const WebSocketConfigPanel = () => {
       clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = null;
     }
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
     }
     setStatus('idle');
     setReconnectAttempts(0);
