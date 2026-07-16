@@ -1,7 +1,11 @@
 {
+  "/_not-found/page": "app/_not-found/page.js",
+  "/alerts/page": "app/alerts/page.js",
+  "/bot-config/page": "app/bot-config/page.js",
   "/performance-analytics/page": "app/performance-analytics/page.js",
+  "/settings/page": "app/settings/page.js",
   "/page": "app/page.js",
-  "/trade-logs/page": "app/trade-logs/page.js",
+  "/risk-rules/page": "app/risk-rules/page.js",
   "/signal-engine/page": "app/signal-engine/page.js",
-  "/settings/page": "app/settings/page.js"
+  "/trade-logs/page": "app/trade-logs/page.js"
 }
