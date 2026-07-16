@@ -5,6 +5,7 @@ import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
+import { formatUsd } from '@/lib/formatters';
 import {
   LayoutDashboard,
   BarChart3,
@@ -43,11 +44,11 @@ const navItems: NavItem[] = [
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname();
   const { data: realtimeData } = useSharedRealtimeData();
-  const balanceLabel = realtimeData?.balance?.totalEquity > 0
-    ? `$${realtimeData.balance.totalEquity.toFixed(2)}`
-    : realtimeData?.balance?.availableBalance > 0
-      ? `$${realtimeData.balance.availableBalance.toFixed(2)}`
-      : '$0.00';
+  const balanceLabel = formatUsd(
+    realtimeData?.balance?.totalEquity ?? realtimeData?.balance?.availableBalance ?? 0,
+    '$0.00',
+    true
+  );
 
   return (
     <div

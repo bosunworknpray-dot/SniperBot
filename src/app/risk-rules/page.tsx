@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { formatUsd } from '@/lib/formatters';
 import { 
   Shield, Save, AlertTriangle, RotateCcw, CheckCircle, 
   Info, Zap, TrendingDown, Settings, Lock, Unlock,
@@ -577,9 +578,9 @@ export default function RiskRulesPage() {
         {/* Risk Assessment Cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {[
-            { label: 'Total Equity', value: `$${riskAssessment.totalEquity.toFixed(2)}`, color: 'text-blue-600' },
+            { label: 'Total Equity', value: formatUsd(riskAssessment.totalEquity, '$0.00', true), color: 'text-blue-600' },
             { label: 'Current Exposure', value: `${riskAssessment.currentExposure}%`, color: riskAssessment.currentExposure > 10 ? 'text-yellow-600' : 'text-green-600' },
-            { label: 'Daily P&L', value: `${riskAssessment.dailyPnL >= 0 ? '+' : ''}$${riskAssessment.dailyPnL.toFixed(2)}`, color: riskAssessment.dailyPnL >= 0 ? 'text-green-600' : 'text-red-600' },
+            { label: 'Daily P&L', value: `${riskAssessment.dailyPnL >= 0 ? '+' : ''}${formatUsd(riskAssessment.dailyPnL, '$0.00', true)}`, color: riskAssessment.dailyPnL >= 0 ? 'text-green-600' : 'text-red-600' },
             { label: 'Risk Score', value: riskAssessment.riskScore, color: riskAssessment.riskScore === 'Low' ? 'text-green-600' : riskAssessment.riskScore === 'Critical' ? 'text-red-600' : 'text-yellow-600' },
           ].map((card) => (
             <div key={card.label} className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-3">

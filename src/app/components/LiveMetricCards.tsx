@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 import { getSharedTradingState, subscribeToSharedTradingState } from '@/lib/tradingState';
+import { formatUsd } from '@/lib/formatters';
 import {
   TrendingUp,
   TrendingDown,
@@ -118,7 +119,7 @@ export default function LiveMetricCards() {
 
   const formatCurrency = (value: number) => {
     if (!showBalance) return '••••••';
-    return `$${value.toFixed(2)}`;
+    return formatUsd(value, '$0.00', true);
   };
 
   const isConnected = useMemo(() => !error && !!realtimeData, [error, realtimeData]);
