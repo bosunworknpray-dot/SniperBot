@@ -1,3 +1,5 @@
+// app/components/EquityCurveChartInner.tsx
+
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -28,12 +30,43 @@ interface EquityStats {
   peakEquity: number;
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  kline: 'https://api.bybit.com/v5/market/kline',
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+
+// ============== API HELPERS ==============
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
 
-const BASE_EQUITY = 100000; // Base equity for simulation
+// ============== API FUNCTIONS ==============
+
+// Fetch kline data
+const fetchKline = async (symbol: string = 'BTCUSDT', interval: string = '240', limit: number = 30): Promise<any[]> => {
+  try {
+    const response = await fetch(
+      `${BYBIT_BASE_URL}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`
+    );
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list;
+    }
+    return [];
+  } catch (error) {
+    console.error('Error fetching kline data:', error);
+    return [];
+  }
+};
+
+// ============== COMPONENT ==============
+
+const BASE_EQUITY = 100000;
 
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
@@ -73,93 +106,85 @@ export default function EquityCurveChartInner() {
       setIsLoading(true);
       setError(null);
 
-      // Fetch real kline data for BTCUSDT (4h intervals, 30 candles)
-      const response = await fetch(`${BYBIT_API.kline}?category=linear&symbol=BTCUSDT&interval=240&limit=30`);
+      // Fetch real kline data for BTCUSDT
+      const klines = await fetchKline('BTCUSDT', '240', 30);
       
-      if (!response.ok) {
-        throw new Error('Failed to fetch kline data');
+      if (klines.length === 0) {
+        throw new Error('No kline data available');
       }
       
-      const result = await response.json();
+      const startPrice = parseFloat(klines[0][1]);
+      const baseEquity = BASE_EQUITY;
       
-      if (result.retCode === 0 && result.result?.list) {
-        const klines = result.result.list;
-        const startPrice = parseFloat(klines[0][1]); // Open price of first candle
-        const baseEquity = BASE_EQUITY;
+      let peakEquity = baseEquity;
+      let maxDrawdown = 0;
+      let peakPrice = startPrice;
+      
+      // Calculate equity and drawdown from real price data
+      const equityData: EquityPoint[] = klines.map((k: any) => {
+        const close = parseFloat(k[4]);
+        const priceChange = ((close - startPrice) / startPrice);
+        const equity = baseEquity * (1 + priceChange * 0.5);
         
-        let peakEquity = baseEquity;
-        let maxDrawdown = 0;
-        let peakPrice = startPrice;
+        // Track peak equity for drawdown calculation
+        if (equity > peakEquity) {
+          peakEquity = equity;
+          peakPrice = close;
+        }
         
-        // Calculate equity and drawdown from real price data
-        const equityData: EquityPoint[] = klines.map((k: any, i: number) => {
-          const close = parseFloat(k[4]);
-          const priceChange = ((close - startPrice) / startPrice);
-          const equity = baseEquity * (1 + priceChange * 0.5);
+        // Calculate drawdown from peak equity
+        const drawdown = peakEquity > 0 ? ((equity - peakEquity) / peakEquity) * 100 : 0;
+        
+        // Track max drawdown
+        if (drawdown < maxDrawdown) {
+          maxDrawdown = drawdown;
+        }
+        
+        const date = new Date(parseInt(k[0]));
+        const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const timeStr = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        
+        return {
+          date: `${dateStr} ${timeStr}`,
+          equity: Math.round(equity * 100) / 100,
+          drawdown: Math.round(drawdown * 100) / 100,
+        };
+      });
+      
+      // Create enhanced data with more points for smoother curve
+      const enhancedData: EquityPoint[] = [];
+      equityData.forEach((point, i) => {
+        enhancedData.push(point);
+        if (i < equityData.length - 1) {
+          const nextPoint = equityData[i + 1];
+          const midEquity = (point.equity + nextPoint.equity) / 2;
+          const midDrawdown = (point.drawdown + nextPoint.drawdown) / 2;
           
-          // Track peak equity for drawdown calculation
-          if (equity > peakEquity) {
-            peakEquity = equity;
-            peakPrice = close;
-          }
-          
-          // Calculate drawdown from peak equity
-          const drawdown = peakEquity > 0 ? ((equity - peakEquity) / peakEquity) * 100 : 0;
-          
-          // Track max drawdown
-          if (drawdown < maxDrawdown) {
-            maxDrawdown = drawdown;
-          }
-          
-          const date = new Date(parseInt(k[0]));
-          const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-          const timeStr = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-          
-          return {
-            date: `${dateStr} ${timeStr}`,
-            equity: Math.round(equity * 100) / 100,
-            drawdown: Math.round(drawdown * 100) / 100,
-          };
-        });
-        
-        // Create enhanced data with more points for smoother curve
-        const enhancedData: EquityPoint[] = [];
-        equityData.forEach((point, i) => {
-          enhancedData.push(point);
-          if (i < equityData.length - 1) {
-            const nextPoint = equityData[i + 1];
-            const midEquity = (point.equity + nextPoint.equity) / 2;
-            const midDrawdown = (point.drawdown + nextPoint.drawdown) / 2;
-            
-            // Add mid-point for smoother curve
-            enhancedData.push({
-              date: `${point.date} → ${nextPoint.date}`,
-              equity: Math.round(midEquity * 100) / 100,
-              drawdown: Math.round(midDrawdown * 100) / 100,
-            });
-          }
-        });
-        
-        // Calculate final stats
-        const finalEquity = enhancedData[enhancedData.length - 1]?.equity || baseEquity;
-        const totalReturn = ((finalEquity - baseEquity) / baseEquity) * 100;
-        
-        setData(enhancedData);
-        setStats({
-          startEquity: baseEquity,
-          currentEquity: finalEquity,
-          totalReturn: totalReturn,
-          maxDrawdown: Math.round(Math.abs(maxDrawdown) * 100) / 100,
-          peakEquity: peakEquity,
-        });
-        
-        setError(null);
-      } else {
-        throw new Error(result.retMsg || 'Failed to fetch kline data');
-      }
+          enhancedData.push({
+            date: `${point.date} → ${nextPoint.date}`,
+            equity: Math.round(midEquity * 100) / 100,
+            drawdown: Math.round(midDrawdown * 100) / 100,
+          });
+        }
+      });
+      
+      // Calculate final stats
+      const finalEquity = enhancedData[enhancedData.length - 1]?.equity || baseEquity;
+      const totalReturn = ((finalEquity - baseEquity) / baseEquity) * 100;
+      
+      setData(enhancedData);
+      setStats({
+        startEquity: baseEquity,
+        currentEquity: finalEquity,
+        totalReturn: totalReturn,
+        maxDrawdown: Math.round(Math.abs(maxDrawdown) * 100) / 100,
+        peakEquity: peakEquity,
+      });
+      
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch equity data:', error);
-      setError('Failed to load equity data');
+      setError(error instanceof Error ? error.message : 'Failed to load equity data');
     } finally {
       setIsLoading(false);
     }

@@ -1,9 +1,10 @@
+// app/alerts/page.tsx - REAL Bybit API Data
+
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { Bell, Check, X, Filter, Trash2, Settings, RefreshCw, Wifi, WifiOff, Loader2 } from 'lucide-react';
-import { toast } from 'sonner';
 
 interface Alert {
   id: string;
@@ -30,38 +31,97 @@ interface NotificationSettings {
   modelRetrains: boolean;
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  positions: 'https://api.bybit.com/v5/position/list',
-  orderHistory: 'https://api.bybit.com/v5/order/history',
-};
-
-const BYBIT_WS = {
-  linear: 'wss://stream.bybit.com/v5/public/linear',
-};
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT'];
 
-// Helper to generate Bybit signature
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
+};
+
 const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
   const paramStr = timestamp + apiSecret + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
-const ALERT_COLORS = {
-  signal: { bg: 'bg-blue-50 dark:bg-blue-950/20', text: 'text-blue-700 dark:text-blue-400', border: 'border-blue-200 dark:border-blue-800' },
-  trade: { bg: 'bg-green-50 dark:bg-green-950/20', text: 'text-green-700 dark:text-green-400', border: 'border-green-200 dark:border-green-800' },
-  risk: { bg: 'bg-yellow-50 dark:bg-yellow-950/20', text: 'text-yellow-700 dark:text-yellow-400', border: 'border-yellow-200 dark:border-yellow-800' },
-  system: { bg: 'bg-gray-50 dark:bg-gray-800/50', text: 'text-gray-700 dark:text-gray-400', border: 'border-gray-200 dark:border-gray-700' },
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
 
-const PRIORITY_DOT = {
-  high: 'bg-red-500',
-  medium: 'bg-yellow-500',
-  low: 'bg-gray-400',
+// ============== API FUNCTIONS ==============
+
+// Fetch ticker data
+const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => {
+  try {
+    const promises = symbols.map(symbol =>
+      fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`)
+        .then(r => safeJsonParse(r))
+        .catch(() => null)
+    );
+    
+    const results = await Promise.all(promises);
+    const tickers: Record<string, any> = {};
+    
+    results.forEach((data: any) => {
+      if (data?.retCode === 0 && data?.result?.list?.[0]) {
+        const ticker = data.result.list[0];
+        tickers[ticker.symbol] = ticker;
+      }
+    });
+    
+    return tickers;
+  } catch (error) {
+    console.error('Error fetching tickers:', error);
+    return {};
+  }
 };
+
+// Fetch positions
+const fetchPositions = async (): Promise<any[]> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) return [];
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list.filter((pos: any) => parseFloat(pos.size) !== 0);
+    }
+    return [];
+  } catch (error) {
+    console.error('Error fetching positions:', error);
+    return [];
+  }
+};
+
+// ============== COMPONENT ==============
 
 export default function AlertsPage() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -71,7 +131,6 @@ export default function AlertsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [lastAlertTime, setLastAlertTime] = useState<number>(Date.now());
   const [marketData, setMarketData] = useState<Record<string, any>>({});
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [isApiConnected, setIsApiConnected] = useState(false);
 
   const [notifSettings, setNotifSettings] = useState<NotificationSettings>({
@@ -85,37 +144,14 @@ export default function AlertsPage() {
     modelRetrains: false,
   });
 
-  // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
-
-  // Load settings from localStorage
-  useEffect(() => {
-    const savedSettings = localStorage.getItem('alert_settings');
-    if (savedSettings) {
-      try {
-        const parsed = JSON.parse(savedSettings);
-        setNotifSettings(prev => ({ ...prev, ...parsed }));
-      } catch (e) {
-        // Ignore parse errors
-      }
-    }
+  const hasValidCredentials = useCallback(() => {
+    const { apiKey, apiSecret } = getApiCredentials();
+    return !!(apiKey && apiSecret);
   }, []);
-
-  // Save settings to localStorage
-  const saveSettings = (settings: NotificationSettings) => {
-    localStorage.setItem('alert_settings', JSON.stringify(settings));
-  };
 
   // Generate alert from market data
   const generateAlertFromMarketData = (symbol: string, ticker: any): Alert | null => {
@@ -135,14 +171,13 @@ export default function AlertsPage() {
       const entry = price;
       const sl = direction === 'LONG' ? price - atr * 1.5 : price + atr * 1.5;
       const tp1 = direction === 'LONG' ? price + atr * 2.5 : price - atr * 2.5;
-      const tp2 = direction === 'LONG' ? price + atr * 4 : price - atr * 4;
 
       return {
         id: `alert-${symbol}-${now}`,
         type: 'signal',
         priority: Math.abs(change24h) > 3 ? 'high' : 'medium',
         title: `🔥 ${direction} Signal: ${symbol}`,
-        message: `${direction} signal at $${price.toFixed(2)} | Confidence: ${Math.round(confidence)}% | Entry: $${entry.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)} | TP2: $${tp2.toFixed(2)}`,
+        message: `${direction} signal at $${price.toFixed(2)} | Confidence: ${Math.round(confidence)}% | Entry: $${entry.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)}`,
         time: 'Just now',
         read: false,
         timestamp: now,
@@ -169,7 +204,7 @@ export default function AlertsPage() {
       };
     }
 
-    // Check for new 24h high/low
+    // Check for new 24h high
     if (price > high24h * 0.995 && notifSettings.systemEvents) {
       return {
         id: `alert-high-${symbol}-${now}`,
@@ -186,6 +221,7 @@ export default function AlertsPage() {
       };
     }
 
+    // Check for new 24h low
     if (price < low24h * 1.005 && notifSettings.systemEvents) {
       return {
         id: `alert-low-${symbol}-${now}`,
@@ -205,130 +241,106 @@ export default function AlertsPage() {
     return null;
   };
 
-  // Fetch real data from Bybit
-  const fetchAlerts = async () => {
+  // Fetch alerts
+  const fetchAlerts = useCallback(async () => {
     try {
       setIsLoading(true);
+      
+      const hasKeys = hasValidCredentials();
+      
+      if (!hasKeys) {
+        setIsApiConnected(false);
+        setIsLoading(false);
+        return;
+      }
+
+      // Fetch ticker data
+      const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      setMarketData(tickers);
+
+      // Fetch positions for trade alerts
+      const positions = await fetchPositions();
+      
       const newAlerts: Alert[] = [];
-      
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      const hasApiKeys = apiKey && apiSecret;
-      
-      // Always fetch ticker data
-      const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
-        fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => r.json())
-          .catch(() => null)
-      );
-      
-      const tickerResults = await Promise.all(tickerPromises);
-      
-      // Process ticker data for alerts
-      tickerResults.forEach((result: any) => {
-        if (result && result.retCode === 0 && result.result?.list?.length > 0) {
-          const ticker = result.result.list[0];
-          const symbol = ticker.symbol;
-          setMarketData(prev => ({ ...prev, [symbol]: ticker }));
+
+      // Generate alerts from ticker data
+      Object.entries(tickers).forEach(([symbol, ticker]) => {
+        const alert = generateAlertFromMarketData(symbol, ticker);
+        if (alert) {
+          newAlerts.push(alert);
+        }
+      });
+
+      // Generate alerts from positions
+      positions.forEach((pos: any) => {
+        const size = parseFloat(pos.size);
+        if (size !== 0 && notifSettings.tradeExecutions) {
+          const side = pos.side === 'Buy' ? 'LONG' : 'SHORT';
+          const pnl = parseFloat(pos.unrealisedPnl || 0);
+          const symbol = pos.symbol;
+          const entryPrice = parseFloat(pos.avgPrice);
+          const markPrice = parseFloat(pos.markPrice);
           
-          const alert = generateAlertFromMarketData(symbol, ticker);
-          if (alert) {
-            newAlerts.push(alert);
+          // Alert for significant P&L (> 5% of position value)
+          const positionValue = entryPrice * Math.abs(size);
+          if (Math.abs(pnl) > positionValue * 0.05) {
+            newAlerts.push({
+              id: `alert-pos-${symbol}-${Date.now()}`,
+              type: 'trade',
+              priority: Math.abs(pnl) > positionValue * 0.1 ? 'high' : 'medium',
+              title: `${pnl >= 0 ? '📈' : '📉'} Position Update: ${symbol}`,
+              message: `${side} position ${pnl >= 0 ? 'profitable' : 'in loss'} | P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} | Entry: $${entryPrice.toFixed(2)} | Current: $${markPrice.toFixed(2)}`,
+              time: 'Just now',
+              read: false,
+              timestamp: Date.now(),
+              symbol,
+              price: markPrice,
+              change24h: 0,
+            });
           }
         }
       });
-      
-      // If API keys exist, fetch positions and trades for alerts
-      if (hasApiKeys) {
-        const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-        const timestamp = Date.now().toString();
-        const recvWindow = '5000';
-        const params = '';
-        
-        const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
-        
-        // Fetch positions
-        const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
-          method: 'GET',
-          headers: {
-            'X-BAPI-API-KEY': apiKey,
-            'X-BAPI-TIMESTAMP': timestamp,
-            'X-BAPI-SIGN': signature,
-            'X-BAPI-RECV-WINDOW': recvWindow,
-          },
-        });
-        
-        const positionsData = await positionsResponse.json();
-        
-        // Generate alerts for open positions
-        if (positionsData.retCode === 0 && positionsData.result?.list) {
-          positionsData.result.list.forEach((pos: any) => {
-            const size = parseFloat(pos.size);
-            if (size !== 0) {
-              const side = pos.side === 'Buy' ? 'LONG' : 'SHORT';
-              const pnl = parseFloat(pos.unrealisedPnl || 0);
-              const symbol = pos.symbol;
-              const entryPrice = parseFloat(pos.avgPrice);
-              const markPrice = parseFloat(pos.markPrice);
-              
-              // Alert for significant P&L (> 5% of position value)
-              const positionValue = entryPrice * Math.abs(size);
-              if (Math.abs(pnl) > positionValue * 0.05) {
-                newAlerts.push({
-                  id: `alert-pos-${symbol}-${Date.now()}`,
-                  type: 'trade',
-                  priority: Math.abs(pnl) > positionValue * 0.1 ? 'high' : 'medium',
-                  title: `${pnl >= 0 ? '📈' : '📉'} Position Update: ${symbol}`,
-                  message: `${side} position ${pnl >= 0 ? 'profitable' : 'in loss'} | P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} | Entry: $${entryPrice.toFixed(2)} | Current: $${markPrice.toFixed(2)}`,
-                  time: 'Just now',
-                  read: false,
-                  timestamp: Date.now(),
-                  symbol,
-                  price: markPrice,
-                  change24h: 0,
-                });
-              }
-            }
-          });
-        }
-        
-        setIsApiConnected(true);
-      } else {
-        setIsApiConnected(false);
-      }
-      
-      // Sort by timestamp descending and limit to 50
+
+      // Sort by timestamp and limit
       const sortedAlerts = newAlerts.sort((a, b) => b.timestamp - a.timestamp).slice(0, 50);
       setAlerts(prev => {
         const combined = [...sortedAlerts, ...prev];
         const unique = Array.from(new Map(combined.map(a => [a.id, a])).values());
         return unique.slice(0, 50);
       });
-      
+
+      setIsApiConnected(true);
       setLastAlertTime(Date.now());
-    } catch (error) {
-      console.error('Failed to fetch alerts:', error);
+
+    } catch (err: any) {
+      console.error('Error fetching alerts:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [hasValidCredentials, notifSettings]);
 
-  // WebSocket connection for real-time updates
-  const connectWebSocket = () => {
+  // Connect WebSocket
+  const connectWebSocket = useCallback(() => {
     try {
       setConnectionStatus('connecting');
       
-      const ws = new WebSocket(BYBIT_WS.linear);
+      const ws = new WebSocket(BYBIT_WS_URL);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
         setConnectionStatus('connected');
-        setReconnectAttempts(0);
+        
         ws.send(JSON.stringify({
           op: 'subscribe',
           args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
         }));
-        startHeartbeat();
+        
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ op: 'ping' }));
+          }
+        }, 30000);
       };
 
       ws.onmessage = (event) => {
@@ -338,96 +350,78 @@ export default function AlertsPage() {
             const ticker = data.data;
             if (ticker && ticker.symbol) {
               setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
-              
               const alert = generateAlertFromMarketData(ticker.symbol, ticker);
               if (alert) {
                 setAlerts(prev => [alert, ...prev].slice(0, 50));
                 setLastAlertTime(Date.now());
               }
             }
-          } else if (data.op === 'pong') {
-            // Heartbeat response - ignore
           }
         } catch (err) {
-          // Ignore parse errors
+          // Ignore
         }
       };
 
-      ws.onerror = (event) => {
-        console.warn('WebSocket error:', event);
-        // Don't set error state here - onclose handles reconnection
+      ws.onerror = () => {
+        setConnectionStatus('error');
       };
 
-      ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code);
+      ws.onclose = () => {
         setConnectionStatus('disconnected');
-        stopHeartbeat();
-        
+        if (heartbeatIntervalRef.current) {
+          clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
+        }
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
-        
-        // Only attempt reconnect if not a normal closure
-        if (event.code !== 1000) {
-          const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
-            connectWebSocket();
-          }, delay);
-        }
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
       };
     } catch (err) {
-      console.error('Failed to connect WebSocket:', err);
       setConnectionStatus('error');
     }
-  };
+  }, []);
 
-  const disconnectWebSocket = () => {
+  const disconnectWebSocket = useCallback(() => {
     if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
+      wsRef.current.close();
       wsRef.current = null;
     }
-    stopHeartbeat();
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
     if (heartbeatIntervalRef.current) {
       clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = null;
     }
-  };
+  }, []);
 
   // Initialize
   useEffect(() => {
     fetchAlerts();
     connectWebSocket();
-    
+
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
         fetchAlerts();
       }
     }, 60000);
-    
+
     return () => {
       clearInterval(interval);
       disconnectWebSocket();
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
     };
-  }, []);
+  }, [fetchAlerts, connectWebSocket, disconnectWebSocket]);
+
+  // Save settings to localStorage
+  useEffect(() => {
+    localStorage.setItem('alert_settings', JSON.stringify(notifSettings));
+  }, [notifSettings]);
 
   const markAllRead = () => {
     setAlerts((a) => a.map((al) => ({ ...al, read: true })));
@@ -462,9 +456,7 @@ export default function AlertsPage() {
   const Toggle = ({ field }: { field: keyof NotificationSettings }) => (
     <button
       onClick={() => {
-        const newSettings = { ...notifSettings, [field]: !notifSettings[field] };
-        setNotifSettings(newSettings);
-        saveSettings(newSettings);
+        setNotifSettings(prev => ({ ...prev, [field]: !prev[field] }));
       }}
       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
         notifSettings[field] ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'
@@ -528,7 +520,9 @@ export default function AlertsPage() {
                 Real-time trading signals, risk warnings, and system events
                 <span className="flex items-center gap-1 text-xs">
                   {getConnectionIcon()}
-                  <span className="capitalize">{connectionStatus}</span>
+                  <span className="capitalize">
+                    {connectionStatus}
+                  </span>
                 </span>
                 {isApiConnected && (
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
@@ -552,15 +546,13 @@ export default function AlertsPage() {
               onClick={deleteAllRead}
               className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/20 transition-colors"
             >
-              <Trash2 size={14} />
-              Clear read
+              <Trash2 size={14} /> Clear read
             </button>
             <button
               onClick={markAllRead}
               className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             >
-              <Check size={14} />
-              Mark all read
+              <Check size={14} /> Mark all read
             </button>
           </div>
         </div>
@@ -598,19 +590,31 @@ export default function AlertsPage() {
                 </div>
               ) : (
                 filtered.map((alert) => {
-                  const colors = ALERT_COLORS[alert.type];
+                  const colors = {
+                    signal: { bg: 'bg-blue-50 dark:bg-blue-950/20', text: 'text-blue-700 dark:text-blue-400', border: 'border-blue-200 dark:border-blue-800' },
+                    trade: { bg: 'bg-green-50 dark:bg-green-950/20', text: 'text-green-700 dark:text-green-400', border: 'border-green-200 dark:border-green-800' },
+                    risk: { bg: 'bg-yellow-50 dark:bg-yellow-950/20', text: 'text-yellow-700 dark:text-yellow-400', border: 'border-yellow-200 dark:border-yellow-800' },
+                    system: { bg: 'bg-gray-50 dark:bg-gray-800/50', text: 'text-gray-700 dark:text-gray-400', border: 'border-gray-200 dark:border-gray-700' },
+                  };
+                  const priorityDot = {
+                    high: 'bg-red-500',
+                    medium: 'bg-yellow-500',
+                    low: 'bg-gray-400',
+                  };
+                  const c = colors[alert.type];
+                  
                   return (
                     <div
                       key={alert.id}
-                      className={`relative p-4 rounded-lg border transition-all ${colors.border} ${colors.bg} ${
+                      className={`relative p-4 rounded-lg border transition-all ${c.border} ${c.bg} ${
                         !alert.read ? 'ring-1 ring-blue-500/20 dark:ring-blue-400/20' : 'opacity-80'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex items-start gap-2 flex-1 min-w-0">
-                          <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${PRIORITY_DOT[alert.priority]}`} />
+                          <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${priorityDot[alert.priority]}`} />
                           <div className="min-w-0">
-                            <p className={`text-sm font-semibold ${colors.text}`}>
+                            <p className={`text-sm font-semibold ${c.text}`}>
                               {alert.title}
                               {alert.symbol && (
                                 <span className="ml-2 text-[10px] text-gray-500 dark:text-gray-400 font-mono">
@@ -662,8 +666,7 @@ export default function AlertsPage() {
             {/* Notification Settings */}
             <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
-                <Settings size={14} />
-                Notification Settings
+                <Settings size={14} /> Notification Settings
               </h3>
               <div className="space-y-3">
                 {[

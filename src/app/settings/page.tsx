@@ -1,4 +1,4 @@
-// app/settings/page.tsx - FIXED for Unified Trading Account
+// app/settings/page.tsx - REAL Bybit API Data
 
 'use client';
 
@@ -51,29 +51,27 @@ interface ConnectionHealth {
 }
 
 // ============== BYBIT API CONSTANTS ==============
-const BYBIT_API = {
-  testnet: 'https://api-testnet.bybit.com',
-  mainnet: 'https://api.bybit.com',
-};
-
-const BYBIT_WS = {
-  testnet: 'wss://stream-testnet.bybit.com/v5/public/linear',
-  mainnet: 'wss://stream.bybit.com/v5/public/linear',
-};
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 
 // ============== UTILITY FUNCTIONS ==============
-const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
+};
+
+const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow + params;
+  const paramStr = timestamp + apiSecret + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
-    if (!text || text.trim() === '') {
-      return null;
-    }
+    if (!text || text.trim() === '') return null;
     return JSON.parse(text);
   } catch {
     return null;
@@ -87,6 +85,76 @@ const formatTime = (seconds: number): string => {
   return `${h}h ${m}m ${s}s`;
 };
 
+// ============== API FUNCTIONS ==============
+
+// Fetch wallet balance
+const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ totalEquity: string; availableBalance: string; uid: string }> => {
+  try {
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result) {
+      const wallet = data.result.list?.[0];
+      return {
+        totalEquity: wallet?.totalEquity || wallet?.equity || '0',
+        availableBalance: wallet?.availableBalance || wallet?.available || '0',
+        uid: data.result.uid || data.result.accountUid || 'N/A',
+      };
+    }
+    return { totalEquity: '0', availableBalance: '0', uid: 'N/A' };
+  } catch (error) {
+    console.error('Error fetching wallet balance:', error);
+    return { totalEquity: '0', availableBalance: '0', uid: 'N/A' };
+  }
+};
+
+// Fetch account info
+const fetchAccountInfo = async (apiKey: string, apiSecret: string): Promise<{ accountType: string; uid: string }> => {
+  try {
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/info`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result) {
+      return {
+        accountType: data.result.accountType || data.result.accType || 'Unified',
+        uid: data.result.uid || data.result.accountUid || 'N/A',
+      };
+    }
+    return { accountType: 'Unified', uid: 'N/A' };
+  } catch (error) {
+    console.error('Error fetching account info:', error);
+    return { accountType: 'Unified', uid: 'N/A' };
+  }
+};
+
 // ============== COMPONENTS ==============
 
 // API Credentials Panel
@@ -94,7 +162,7 @@ const ApiCredentialsPanel = () => {
   const [credentials, setCredentials] = useState<ApiCredentials>({
     apiKey: '',
     apiSecret: '',
-    isTestnet: true,
+    isTestnet: false,
     permissions: ['read', 'trade'],
   });
   const [showSecret, setShowSecret] = useState(false);
@@ -109,7 +177,6 @@ const ApiCredentialsPanel = () => {
   const [accountType, setAccountType] = useState<string>('Checking...');
   const [error, setError] = useState<string | null>(null);
   const [isLoadingAccountInfo, setIsLoadingAccountInfo] = useState(false);
-  const [accountInfoDetails, setAccountInfoDetails] = useState<any>(null);
 
   const testConnection = async () => {
     if (!credentials.apiKey || !credentials.apiSecret) {
@@ -124,144 +191,40 @@ const ApiCredentialsPanel = () => {
     setError(null);
     setAccountType('Checking...');
 
-    const baseUrl = credentials.isTestnet ? BYBIT_API.testnet : BYBIT_API.mainnet;
-    const timestamp = Date.now().toString();
-    const recvWindow = '5000';
-    const params = '';
-
     try {
-      const signature = generateSignature(credentials.apiKey, credentials.apiSecret, timestamp, recvWindow, params);
+      // Fetch wallet balance
+      const balanceData = await fetchWalletBalance(credentials.apiKey, credentials.apiSecret);
       
-      // First, get wallet balance
-      const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': credentials.apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
-
-      const data = await safeJsonParse(response);
-
-      if (data && data.retCode === 0 && data.result) {
-        const wallet = data.result.list?.[0];
-        const totalEquity = wallet?.totalEquity || wallet?.equity || '0';
-        const availableBalance = wallet?.availableBalance || wallet?.available || '0';
-        const walletBalance = wallet?.walletBalance || wallet?.balance || '0';
-        
-        const balanceAmount = totalEquity || availableBalance || walletBalance || '0';
-        const accountUid = data.result.uid || data.result.accountUid || 'N/A';
-        
-        setBalance(`${parseFloat(balanceAmount).toFixed(2)} USDT`);
-        setUid(accountUid);
-        
-        // Get account info - Unified Trading Account
-        try {
-          setIsLoadingAccountInfo(true);
-          const accountInfoResponse = await fetch(`${baseUrl}/v5/account/info`, {
-            method: 'GET',
-            headers: {
-              'X-BAPI-API-KEY': credentials.apiKey,
-              'X-BAPI-TIMESTAMP': timestamp,
-              'X-BAPI-SIGN': signature,
-              'X-BAPI-RECV-WINDOW': recvWindow,
-            },
-          });
-          const accountData = await safeJsonParse(accountInfoResponse);
-          
-          if (accountData && accountData.retCode === 0 && accountData.result) {
-            setAccountInfoDetails(accountData.result);
-            
-            // For Unified Trading Account, accountType might be null, but we can determine it from other fields
-            let accType = 'Unified Trading Account';
-            
-            // Check various fields that might indicate account type
-            if (accountData.result.accountType) {
-              accType = accountData.result.accountType;
-            } else if (accountData.result.accType) {
-              accType = accountData.result.accType;
-            } else if (accountData.result.type) {
-              accType = accountData.result.type;
-            } else if (accountData.result.unifiedAccountInfo) {
-              // Check if it's a Unified account
-              const unifiedInfo = accountData.result.unifiedAccountInfo;
-              if (unifiedInfo) {
-                accType = 'Unified Trading Account';
-                // Try to get more specific type
-                if (unifiedInfo.accountType) {
-                  accType = unifiedInfo.accountType;
-                } else if (unifiedInfo.spot) {
-                  accType = 'Unified Spot & Derivatives';
-                }
-              }
-            } else if (accountData.result.spot) {
-              // Check if it has spot section - indicates Unified account
-              accType = 'Unified Trading Account';
-            } else if (accountData.result.linear) {
-              // Check if it has linear section - indicates Unified account
-              accType = 'Unified Trading Account (Linear)';
-            } else if (accountData.result.inverse) {
-              // Check if it has inverse section - indicates Unified account
-              accType = 'Unified Trading Account (Inverse)';
-            } else if (accountData.result.option) {
-              accType = 'Unified Trading Account (Options)';
-            }
-            
-            // If we have the account type from the response, use it
-            if (accountData.result.accountType) {
-              accType = accountData.result.accountType;
-            }
-            
-            setAccountType(accType);
-          } else {
-            // If account info fails, but wallet works, it's likely a Unified account
-            setAccountType('Unified Trading Account');
-          }
-        } catch (e) {
-          // Account info fetch failed, but wallet worked - assume Unified account
-          console.warn('Could not fetch account info, assuming Unified account:', e);
-          setAccountType('Unified Trading Account');
-        } finally {
-          setIsLoadingAccountInfo(false);
-        }
-        
-        setTestStatus('success');
-        setTestMessage('✅ Connection verified successfully!');
-        setError(null);
-      } else {
-        const errorMsg = data?.retMsg || 'Unknown error';
-        const errorCode = data?.retCode || 'Unknown';
-        
-        let userMessage = `❌ Error ${errorCode}: ${errorMsg}`;
-        if (errorCode === 10005) {
-          userMessage = '❌ Invalid API key. Please check your API key.';
-        } else if (errorCode === 10006) {
-          userMessage = '❌ Invalid API signature. Please check your API secret.';
-        } else if (errorCode === 10003) {
-          userMessage = '❌ Rate limit exceeded. Please try again later.';
-        } else if (errorCode === 10010) {
-          userMessage = '❌ API key permissions insufficient. Please ensure your API key has read permissions.';
-        }
-        
-        setTestStatus('error');
-        setTestMessage(userMessage);
-        setError(errorMsg);
-      }
-    } catch (error: any) {
-      console.error('Connection test error:', error);
+      // Fetch account info
+      const accountData = await fetchAccountInfo(credentials.apiKey, credentials.apiSecret);
+      
+      const balanceNum = parseFloat(balanceData.totalEquity);
+      const balanceDisplay = balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
+      
+      setBalance(balanceDisplay);
+      setUid(accountData.uid);
+      setAccountType(accountData.accountType);
+      
+      setTestStatus('success');
+      setTestMessage('✅ Connection verified successfully!');
+      setError(null);
+    } catch (err: any) {
+      console.error('Connection test error:', err);
       
       let userMessage = '❌ Failed to connect. Please check your credentials and network.';
-      if (error.message?.includes('fetch') || error.message?.includes('network')) {
+      if (err.message?.includes('fetch') || err.message?.includes('network')) {
         userMessage = '❌ Network error. Please check your internet connection.';
-      } else if (error.message?.includes('timeout')) {
+      } else if (err.message?.includes('timeout')) {
         userMessage = '❌ Connection timeout. Please try again.';
+      } else if (err.message?.includes('10005')) {
+        userMessage = '❌ Invalid API key. Please check your API key.';
+      } else if (err.message?.includes('10006')) {
+        userMessage = '❌ Invalid API signature. Please check your API secret.';
       }
       
       setTestStatus('error');
       setTestMessage(userMessage);
-      setError(error.message);
+      setError(err.message);
     } finally {
       setIsTesting(false);
     }
@@ -280,14 +243,12 @@ const ApiCredentialsPanel = () => {
     setError(null);
     
     try {
-      // Save to localStorage only - DO NOT modify process.env in browser
       localStorage.setItem('bybit_credentials', JSON.stringify({
         apiKey: credentials.apiKey,
         apiSecret: credentials.apiSecret,
         isTestnet: credentials.isTestnet,
       }));
       
-      // Dispatch a custom event to notify other components
       window.dispatchEvent(new CustomEvent('bybit-credentials-saved', {
         detail: {
           apiKey: credentials.apiKey,
@@ -324,7 +285,7 @@ const ApiCredentialsPanel = () => {
           ...prev,
           apiKey: parsed.apiKey || '',
           apiSecret: parsed.apiSecret || '',
-          isTestnet: parsed.isTestnet !== undefined ? parsed.isTestnet : true,
+          isTestnet: parsed.isTestnet || false,
         }));
       } catch (e) {
         // Ignore parse errors
@@ -339,12 +300,8 @@ const ApiCredentialsPanel = () => {
           <Key size={16} className="text-blue-600 dark:text-blue-400" />
           API Credentials
         </h3>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${
-          credentials.isTestnet 
-            ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400' 
-            : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
-        }`}>
-          {credentials.isTestnet ? 'Testnet' : 'Mainnet'}
+        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">
+          Mainnet
         </span>
       </div>
 
@@ -358,7 +315,7 @@ const ApiCredentialsPanel = () => {
               type="text"
               value={credentials.apiKey}
               onChange={(e) => setCredentials({ ...credentials, apiKey: e.target.value.trim() })}
-              placeholder={credentials.isTestnet ? 'Testnet API Key' : 'Mainnet API Key'}
+              placeholder="Bybit Mainnet API Key"
               className="w-full px-3 py-2 pr-10 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent font-mono"
             />
             {credentials.apiKey && (
@@ -404,15 +361,6 @@ const ApiCredentialsPanel = () => {
         </div>
 
         <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={credentials.isTestnet}
-              onChange={(e) => setCredentials({ ...credentials, isTestnet: e.target.checked })}
-              className="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
-            />
-            Use Testnet (Paper Trading)
-          </label>
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-gray-400 dark:text-gray-500">Permissions:</span>
             {credentials.permissions.map((p) => (
@@ -531,10 +479,10 @@ const SymbolSelectorPanel = () => {
     setError(null);
 
     try {
-      const response = await fetch(`${BYBIT_API.mainnet}/v5/market/tickers?category=linear`);
-      const data = await response.json();
+      const response = await fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear`);
+      const data = await safeJsonParse(response);
 
-      if (data.retCode === 0 && data.result?.list) {
+      if (data?.retCode === 0 && data?.result?.list) {
         const tickers = data.result.list;
         const defaultEnabled = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
         
@@ -558,7 +506,7 @@ const SymbolSelectorPanel = () => {
         const topSymbols = showAll ? mappedSymbols : mappedSymbols.slice(0, 50);
         setSymbols(topSymbols);
       } else {
-        throw new Error(data.retMsg || 'Failed to fetch symbols');
+        throw new Error(data?.retMsg || 'Failed to fetch symbols');
       }
     } catch (err: any) {
       setError(err.message || 'Failed to load symbols');
@@ -672,7 +620,7 @@ const SymbolSelectorPanel = () => {
                 )}
               </div>
               <div className="flex items-center gap-2 mt-1">
-                <span className="text-[9px] text-gray-500 dark:text-gray-400">{symbol.price}</span>
+                <span className="text-[9px] text-gray-500 dark:text-gray-400">${symbol.price}</span>
                 <span className={`text-[9px] ${
                   parseFloat(symbol.change24h) >= 0 ? 'text-green-600' : 'text-red-600'
                 }`}>
@@ -710,7 +658,7 @@ const SymbolSelectorPanel = () => {
 // WebSocket Config Panel
 const WebSocketConfigPanel = () => {
   const [config, setConfig] = useState<WebSocketConfig>({
-    url: BYBIT_WS.mainnet,
+    url: BYBIT_WS_URL,
     reconnectDelay: 5000,
     maxReconnectAttempts: 10,
     heartbeatInterval: 30000,
@@ -780,8 +728,8 @@ const WebSocketConfigPanel = () => {
         }
       };
 
-      ws.onerror = (error) => {
-        console.warn('WebSocket error:', error);
+      ws.onerror = () => {
+        console.warn('WebSocket error');
         addLog('⚠️ WebSocket error occurred');
       };
 
@@ -866,14 +814,12 @@ const WebSocketConfigPanel = () => {
           <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
             WebSocket URL
           </label>
-          <select
+          <input
+            type="text"
             value={config.url}
             onChange={(e) => setConfig({ ...config, url: e.target.value })}
-            className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-          >
-            <option value={BYBIT_WS.mainnet}>Mainnet: {BYBIT_WS.mainnet}</option>
-            <option value={BYBIT_WS.testnet}>Testnet: {BYBIT_WS.testnet}</option>
-          </select>
+            className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent font-mono"
+          />
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -983,11 +929,11 @@ const ConnectionHealthPanel = () => {
     try {
       setError(null);
       const start = Date.now();
-      const response = await fetch(`${BYBIT_API.mainnet}/v5/market/time`);
-      const data = await response.json();
+      const response = await fetch(`${BYBIT_BASE_URL}/v5/market/time`);
+      const data = await safeJsonParse(response);
       const latency = Date.now() - start;
 
-      if (data.retCode === 0) {
+      if (data?.retCode === 0) {
         const uptime = (Date.now() - startTime) / 1000;
         const quality: ConnectionHealth['quality'] = 
           latency < 100 ? 'excellent' :

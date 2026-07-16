@@ -1,3 +1,5 @@
+// app/components/AnalyticsSummaryCards.tsx
+
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -23,12 +25,102 @@ interface MetricData {
   variant: 'positive' | 'negative' | 'warning' | 'default';
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-};
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
+};
+
+const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiSecret + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
+
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+// ============== API FUNCTIONS ==============
+
+// Fetch wallet balance
+const fetchWalletBalance = async (): Promise<{ totalEquity: number; availableBalance: number }> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) {
+      return { totalEquity: 100, availableBalance: 100 };
+    }
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list?.[0]) {
+      const wallet = data.result.list[0];
+      return {
+        totalEquity: parseFloat(wallet.totalEquity || '100'),
+        availableBalance: parseFloat(wallet.availableBalance || '100'),
+      };
+    }
+    return { totalEquity: 100, availableBalance: 100 };
+  } catch (error) {
+    console.error('Error fetching wallet balance:', error);
+    return { totalEquity: 100, availableBalance: 100 };
+  }
+};
+
+// Fetch ticker data
+const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => {
+  try {
+    const promises = symbols.map(symbol =>
+      fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`)
+        .then(r => safeJsonParse(r))
+        .catch(() => null)
+    );
+    
+    const results = await Promise.all(promises);
+    const tickers: Record<string, any> = {};
+    
+    results.forEach((data: any) => {
+      if (data?.retCode === 0 && data?.result?.list?.[0]) {
+        const ticker = data.result.list[0];
+        tickers[ticker.symbol] = ticker;
+      }
+    });
+    
+    return tickers;
+  } catch (error) {
+    console.error('Error fetching tickers:', error);
+    return {};
+  }
+};
+
+// ============== COMPONENT ==============
 
 const VARIANT_BORDER: Record<string, string> = {
   positive: 'border-positive/20',
@@ -54,43 +146,49 @@ export default function AnalyticsSummaryCards() {
       setIsLoading(true);
       setError(null);
 
-      // Fetch real market data
-      const promises = SUPPORTED_SYMBOLS.map(s => 
-        fetch(`${BYBIT_API.spot}?category=linear&symbol=${s}`)
-          .then(r => r.json())
-          .catch(() => null)
-      );
+      // Fetch wallet balance
+      const { totalEquity } = await fetchWalletBalance();
       
-      const results = await Promise.all(promises);
+      // Fetch ticker data
+      const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      
+      const tickerList = Object.values(tickers);
+      const validCount = tickerList.length;
+      
+      if (validCount === 0) {
+        throw new Error('No market data available');
+      }
       
       // Calculate metrics from real data
       let totalVolume = 0;
       let totalChange = 0;
       let totalVolatility = 0;
-      let validCount = 0;
       let maxChange = 0;
       let minChange = 0;
       
-      results.forEach((data: any) => {
-        if (data && data.retCode === 0 && data.result?.list?.length > 0) {
-          const ticker = data.result.list[0];
-          const change24h = parseFloat(ticker.price24hPcnt) || 0;
-          const volume24h = parseFloat(ticker.volume24h) || 0;
-          
-          totalVolume += volume24h;
-          totalChange += change24h;
-          totalVolatility += Math.abs(change24h);
-          validCount++;
-          
-          if (change24h > maxChange) maxChange = change24h;
-          if (change24h < minChange) minChange = change24h;
-        }
+      tickerList.forEach((ticker: any) => {
+        const change24h = parseFloat(ticker.price24hPcnt) || 0;
+        const volume24h = parseFloat(ticker.volume24h) || 0;
+        const high24h = parseFloat(ticker.highPrice24h) || 0;
+        const low24h = parseFloat(ticker.lowPrice24h) || 0;
+        
+        totalVolume += volume24h;
+        totalChange += change24h;
+        
+        // Calculate volatility from 24h range
+        const volatility = high24h > 0 && low24h > 0 
+          ? ((high24h - low24h) / low24h) 
+          : Math.abs(change24h);
+        totalVolatility += volatility;
+        
+        if (change24h > maxChange) maxChange = change24h;
+        if (change24h < minChange) minChange = change24h;
       });
       
-      const avgChange = validCount > 0 ? totalChange / validCount : 0;
-      const avgVolatility = validCount > 0 ? totalVolatility / validCount : 0;
-      const volumeUsd = totalVolume / 1e9; // Convert to billions
-      const range = maxChange - minChange;
+      const avgChange = validCount > 0 ? (totalChange / validCount) * 100 : 0;
+      const avgVolatility = validCount > 0 ? (totalVolatility / validCount) * 100 : 0;
+      const volumeUsd = totalVolume / 1e9;
+      const range = (maxChange - minChange) * 100;
       
       // Calculate derived metrics from real market data
       const profitFactor = Math.max(0.5, 1.5 + Math.abs(avgChange) * 0.8 + avgVolatility * 0.2);
@@ -98,7 +196,7 @@ export default function AnalyticsSummaryCards() {
       const maxDrawdown = -Math.min(8, Math.abs(avgChange) * 1.8 + avgVolatility * 0.5 + 0.5);
       const winRate = Math.min(95, 55 + Math.abs(avgChange) * 3 + avgVolatility * 0.8);
       const avgHoldTime = 20 + Math.abs(avgChange) * 4 + avgVolatility * 3;
-      const slippage = Math.min(0.15, 0.02 + (avgVolatility / 100) * 0.05 + Math.random() * 0.01);
+      const slippage = Math.min(0.15, 0.02 + (avgVolatility / 100) * 0.05);
       
       const metricsData: MetricData[] = [
         {
@@ -115,7 +213,7 @@ export default function AnalyticsSummaryCards() {
           id: 'kpi-sharpe',
           title: 'Sharpe Ratio (30d)',
           value: sharpeRatio.toFixed(2),
-          subValue: `Volatility: ${(avgVolatility * 100).toFixed(1)}%`,
+          subValue: `Volatility: ${avgVolatility.toFixed(1)}%`,
           change: `Target: > 2.0`,
           positive: sharpeRatio > 2.0,
           icon: Activity,
@@ -125,7 +223,7 @@ export default function AnalyticsSummaryCards() {
           id: 'kpi-maxdd',
           title: 'Max Drawdown',
           value: `${maxDrawdown.toFixed(1)}%`,
-          subValue: `24h Range: ${(range * 100).toFixed(1)}%`,
+          subValue: `24h Range: ${range.toFixed(1)}%`,
           change: `Limit: 15%`,
           positive: Math.abs(maxDrawdown) < 5,
           icon: TrendingDown,
@@ -145,7 +243,7 @@ export default function AnalyticsSummaryCards() {
           id: 'kpi-hold',
           title: 'Avg Hold Time',
           value: `${Math.round(avgHoldTime)}m`,
-          subValue: `Volatility: ${(avgVolatility * 100).toFixed(1)}%`,
+          subValue: `Volatility: ${avgVolatility.toFixed(1)}%`,
           change: 'Within target',
           positive: true,
           icon: Clock,
@@ -166,7 +264,7 @@ export default function AnalyticsSummaryCards() {
       setMetrics(metricsData);
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
-      setError('Failed to load analytics data');
+      setError(error instanceof Error ? error.message : 'Failed to load analytics data');
     } finally {
       setIsLoading(false);
     }

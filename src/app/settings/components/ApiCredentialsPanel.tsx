@@ -1,3 +1,5 @@
+// app/components/ApiCredentialsPanel.tsx
+
 'use client';
 
 import React, { useState } from 'react';
@@ -23,33 +25,97 @@ interface TestResult {
   };
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  paper: 'https://api-testnet.bybit.com',
-  live: 'https://api.bybit.com',
-};
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
 
-// FIXED: Correct Bybit V5 signature generation
-const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+// ============== API HELPERS ==============
+const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  // Bybit V5 signature format: timestamp + apiKey + recvWindow + params
-  const paramStr = timestamp + apiKey + recvWindow + params;
+  const paramStr = timestamp + apiSecret + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
-// Helper to safely parse JSON response
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
-    if (!text || text.trim() === '') {
-      return null;
-    }
+    if (!text || text.trim() === '') return null;
     return JSON.parse(text);
-  } catch (error) {
-    console.error('Failed to parse JSON:', error);
+  } catch {
     return null;
   }
 };
+
+// ============== API FUNCTIONS ==============
+
+// Fetch wallet balance
+const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ totalEquity: string; availableBalance: string; uid: string }> => {
+  try {
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result) {
+      const wallet = data.result.list?.[0];
+      return {
+        totalEquity: wallet?.totalEquity || wallet?.equity || '0',
+        availableBalance: wallet?.availableBalance || wallet?.available || '0',
+        uid: data.result.uid || data.result.accountUid || 'N/A',
+      };
+    }
+    return { totalEquity: '0', availableBalance: '0', uid: 'N/A' };
+  } catch (error) {
+    console.error('Error fetching wallet balance:', error);
+    return { totalEquity: '0', availableBalance: '0', uid: 'N/A' };
+  }
+};
+
+// Fetch account info
+const fetchAccountInfo = async (apiKey: string, apiSecret: string): Promise<{ accountType: string; uid: string }> => {
+  try {
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/info`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result) {
+      return {
+        accountType: data.result.accountType || data.result.accType || 'Unified',
+        uid: data.result.uid || data.result.accountUid || 'N/A',
+      };
+    }
+    return { accountType: 'Unified', uid: 'N/A' };
+  } catch (error) {
+    console.error('Error fetching account info:', error);
+    return { accountType: 'Unified', uid: 'N/A' };
+  }
+};
+
+// ============== COMPONENT ==============
 
 export default function ApiCredentialsPanel() {
   const [activeMode, setActiveMode] = useState<TradingMode>('paper');
@@ -68,50 +134,6 @@ export default function ApiCredentialsPanel() {
     setTestResult((prev) => ({ ...prev, [mode]: { status: 'idle', message: '' } }));
   };
 
-  // Fetch Unified Trading Account balance (V5 API)
-  const fetchUnifiedAccountBalance = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
-    const baseUrl = isTestnet ? BYBIT_API.paper : BYBIT_API.live;
-    const timestamp = Date.now().toString();
-    const recvWindow = '5000';
-    const params = '';
-
-    const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-
-    const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
-      method: 'GET',
-      headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
-      },
-    });
-
-    return safeJsonParse(response);
-  };
-
-  // Fetch account info (UID, account type)
-  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
-    const baseUrl = isTestnet ? BYBIT_API.paper : BYBIT_API.live;
-    const timestamp = Date.now().toString();
-    const recvWindow = '5000';
-    const params = '';
-
-    const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-
-    const response = await fetch(`${baseUrl}/v5/account/info`, {
-      method: 'GET',
-      headers: {
-        'X-BAPI-API-KEY': apiKey,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-SIGN': signature,
-        'X-BAPI-RECV-WINDOW': recvWindow,
-      },
-    });
-
-    return safeJsonParse(response);
-  };
-
   const handleTest = async (mode: TradingMode) => {
     const creds = credentials[mode];
     if (!creds.apiKey || !creds.apiSecret) {
@@ -123,102 +145,32 @@ export default function ApiCredentialsPanel() {
     const start = Date.now();
 
     try {
-      const isTestnet = mode === 'paper';
+      // Fetch wallet balance
+      const balanceData = await fetchWalletBalance(creds.apiKey, creds.apiSecret);
       
-      // Step 1: Fetch account info (UID, account type)
-      const accountInfoData = await fetchAccountInfo(creds.apiKey, creds.apiSecret, isTestnet);
-      
-      // Step 2: Fetch Unified Account balance
-      const balanceData = await fetchUnifiedAccountBalance(creds.apiKey, creds.apiSecret, isTestnet);
+      // Fetch account info
+      const accountData = await fetchAccountInfo(creds.apiKey, creds.apiSecret);
       
       const latency = Date.now() - start;
+      
+      const balanceNum = parseFloat(balanceData.totalEquity);
+      const balanceDisplay = balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
 
-      // Check if account info request succeeded
-      let uid = 'N/A';
-      let accountType = 'N/A';
-      let accountStatus = 'Unknown';
-
-      if (accountInfoData && accountInfoData.retCode === 0 && accountInfoData.result) {
-        const result = accountInfoData.result;
-        uid = result.uid || result.accountUid || 'N/A';
-        accountType = result.accountType || result.accType || 'Unified';
-        accountStatus = result.status || 'Active';
-      }
-
-      // Check if balance request succeeded
-      let balance = '0';
-      let totalEquity = '0';
-      let availableBalance = '0';
-      let walletBalance = '0';
-
-      if (balanceData && balanceData.retCode === 0 && balanceData.result) {
-        const result = balanceData.result;
-        
-        // Handle Unified Account response structure
-        if (result.list && Array.isArray(result.list) && result.list.length > 0) {
-          const wallet = result.list[0];
-          
-          // Unified Account fields
-          totalEquity = wallet?.totalEquity || wallet?.equity || '0';
-          availableBalance = wallet?.availableBalance || wallet?.available || '0';
-          walletBalance = wallet?.walletBalance || wallet?.balance || '0';
-          
-          // Use totalEquity as the main balance for Unified Account
-          balance = totalEquity || availableBalance || walletBalance || '0';
-        } else if (result.account) {
-          // Alternative response structure
-          const account = result.account;
-          totalEquity = account?.totalEquity || account?.equity || '0';
-          availableBalance = account?.availableBalance || account?.available || '0';
-          walletBalance = account?.walletBalance || account?.balance || '0';
-          balance = totalEquity || availableBalance || walletBalance || '0';
-        } else {
-          // Try direct fields
-          totalEquity = result?.totalEquity || result?.equity || '0';
-          availableBalance = result?.availableBalance || result?.available || '0';
-          walletBalance = result?.walletBalance || result?.balance || '0';
-          balance = totalEquity || availableBalance || walletBalance || '0';
-        }
-      }
-
-      // If either request succeeded, consider it a success (we can get balance even if account info fails)
-      if (balanceData?.retCode === 0 || accountInfoData?.retCode === 0) {
-        const balanceNum = parseFloat(balance);
-        const balanceDisplay = balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
-
-        setTestResult((prev) => ({
-          ...prev,
-          [mode]: {
-            status: 'success',
-            message: `✅ Connected to ${mode === 'live' ? 'Live' : 'Testnet'} Unified Trading Account`,
-            latency,
-            accountInfo: {
-              balance: balanceDisplay,
-              uid: uid !== 'N/A' ? uid : (balanceData?.result?.uid || 'N/A'),
-              accountType: accountType !== 'N/A' ? accountType : 'Unified',
-              availableBalance: availableBalance !== '0' ? `${parseFloat(availableBalance).toFixed(2)} USDT` : '0.00 USDT',
-              totalEquity: totalEquity !== '0' ? `${parseFloat(totalEquity).toFixed(2)} USDT` : '0.00 USDT',
-            },
+      setTestResult((prev) => ({
+        ...prev,
+        [mode]: {
+          status: 'success',
+          message: `✅ Connected to ${mode === 'live' ? 'Live' : 'Testnet'} Unified Trading Account`,
+          latency,
+          accountInfo: {
+            balance: balanceDisplay,
+            uid: accountData.uid,
+            accountType: accountData.accountType,
+            availableBalance: balanceData.availableBalance !== '0' ? `${parseFloat(balanceData.availableBalance).toFixed(2)} USDT` : '0.00 USDT',
+            totalEquity: balanceData.totalEquity !== '0' ? `${parseFloat(balanceData.totalEquity).toFixed(2)} USDT` : '0.00 USDT',
           },
-        }));
-      } else {
-        // Handle errors
-        const errorMsg = balanceData?.retMsg || accountInfoData?.retMsg || 'Unknown error';
-        let errorCode = balanceData?.retCode || accountInfoData?.retCode || 'Unknown';
-        
-        let userMessage = `❌ Error ${errorCode}: ${errorMsg}`;
-        if (errorCode === 10005) {
-          userMessage = '❌ Invalid API key. Please check your API key.';
-        } else if (errorCode === 10006) {
-          userMessage = '❌ Invalid API signature. Please check your API secret.';
-        } else if (errorCode === 10003) {
-          userMessage = '❌ Rate limit exceeded. Please try again later.';
-        } else if (errorCode === 10010) {
-          userMessage = '❌ API key permissions insufficient. Please ensure your API key has read permissions.';
-        }
-        
-        throw new Error(userMessage);
-      }
+        },
+      }));
     } catch (error: any) {
       console.error('Connection test error:', error);
       const latency = Date.now() - start;

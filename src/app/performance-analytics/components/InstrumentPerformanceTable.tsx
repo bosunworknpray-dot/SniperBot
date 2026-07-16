@@ -1,7 +1,9 @@
+// app/components/InstrumentPerformanceTable.tsx
+
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { ChevronUp, ChevronDown, Loader2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { ChevronUp, ChevronDown, Loader2, AlertCircle } from 'lucide-react';
 import StatusBadge from '@/components/ui/StatusBadge';
 
 interface InstrumentRow {
@@ -28,20 +30,12 @@ interface InstrumentRow {
 
 type SortKey = keyof InstrumentRow;
 
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  accountInfo: 'https://api.bybit.com/v5/account/info',
-};
-
-const BYBIT_WS = {
-  linear: 'wss://stream.bybit.com/v5/public/linear',
-  private: 'wss://stream.bybit.com/v5/private/linear',
-};
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT', 'DOTUSDT'];
 
-// Helper to safely parse JSON
+// ============== API HELPERS ==============
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
@@ -52,12 +46,35 @@ const safeJsonParse = async (response: Response) => {
   }
 };
 
-// Helper to generate Bybit signature
-const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
-  const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow + params;
-  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+// ============== API FUNCTIONS ==============
+
+// Fetch ticker data
+const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => {
+  try {
+    const promises = symbols.map(symbol =>
+      fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`)
+        .then(r => safeJsonParse(r))
+        .catch(() => null)
+    );
+    
+    const results = await Promise.all(promises);
+    const tickers: Record<string, any> = {};
+    
+    results.forEach((data: any) => {
+      if (data?.retCode === 0 && data?.result?.list?.[0]) {
+        const ticker = data.result.list[0];
+        tickers[ticker.symbol] = ticker;
+      }
+    });
+    
+    return tickers;
+  } catch (error) {
+    console.error('Error fetching tickers:', error);
+    return {};
+  }
 };
+
+// ============== COMPONENT ==============
 
 export default function InstrumentPerformanceTable() {
   const [data, setData] = useState<InstrumentRow[]>([]);
@@ -65,325 +82,88 @@ export default function InstrumentPerformanceTable() {
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('netPnl');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting' | 'authenticated'>('connecting');
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
-
-  // WebSocket refs
-  const wsRef = useRef<WebSocket | null>(null);
-  const privateWsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
-
-  // Fetch account info for Unified Account
-  const fetchAccountInfo = async () => {
-    try {
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      if (!apiKey || !apiSecret) return;
-
-      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
-      
-      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-      
-      const response = await fetch(`${baseUrl}/v5/account/info`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
-
-      const result = await safeJsonParse(response);
-      
-      if (result && result.retCode === 0 && result.result) {
-        const account = result.result;
-        setAccountInfo({
-          uid: account.uid || account.accountUid || 'N/A',
-          accountType: account.accountType || account.accType || 'Unified',
-        });
-      }
-    } catch (error) {
-      console.error('Error fetching account info:', error);
-    }
-  };
 
   const fetchData = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      // Fetch account info
-      await fetchAccountInfo();
-
-      const promises = SUPPORTED_SYMBOLS.map(s => 
-        fetch(`${BYBIT_API.spot}?category=linear&symbol=${s}`)
-          .then(r => safeJsonParse(r))
-          .catch(() => null)
-      );
+      // Fetch real market data
+      const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      const tickerList = Object.values(tickers);
       
-      const results = await Promise.all(promises);
+      if (tickerList.length === 0) {
+        throw new Error('No market data available');
+      }
       
-      const instrumentData: InstrumentRow[] = results
-        .map((result: any) => {
-          if (result && result.retCode === 0 && result.result?.list?.length > 0) {
-            const ticker = result.result.list[0];
-            const price = parseFloat(ticker.lastPrice);
-            const change24h = parseFloat(ticker.price24hPcnt) * 100;
-            const volume = parseFloat(ticker.volume24h);
-            const high24h = parseFloat(ticker.highPrice24h);
-            const low24h = parseFloat(ticker.lowPrice24h);
-            
-            // Calculate volatility from 24h range
-            const volatility = high24h > 0 && low24h > 0 ? ((high24h - low24h) / low24h) * 100 : Math.abs(change24h);
-            
-            // Derive trade metrics from real market data
-            const tradeCount = Math.max(1, Math.round(5 + Math.abs(change24h) * 0.5 + volatility * 0.3));
-            const winRate = Math.min(90, Math.max(40, 55 + Math.abs(change24h) * 1.5 + volatility * 0.3));
-            const wins = Math.round(tradeCount * (winRate / 100));
-            const losses = tradeCount - wins;
-            
-            // Calculate P&L from real price movements
-            const avgProfit = Math.abs(change24h) * 2 + volatility * 0.5;
-            const avgLoss = 15 + volatility * 0.8 + Math.abs(change24h) * 0.5;
-            const grossProfit = wins * avgProfit;
-            const grossLoss = losses * avgLoss;
-            const netPnl = grossProfit - grossLoss;
-            const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 3.0;
-            
-            // Determine regime from actual price behavior
-            let regime: 'trending' | 'ranging' | 'volatile';
-            if (Math.abs(change24h) > 3) regime = 'trending';
-            else if (volatility > 2 || Math.abs(change24h) > 1.5) regime = 'volatile';
-            else regime = 'ranging';
-            
-            return {
-              id: `inst-${ticker.symbol.toLowerCase()}`,
-              symbol: ticker.symbol,
-              trades: tradeCount,
-              wins,
-              losses,
-              winRate: Math.round(winRate * 10) / 10,
-              grossProfit: Math.round(grossProfit * 10) / 10,
-              grossLoss: Math.round(grossLoss * 10) / 10,
-              profitFactor: Math.round(profitFactor * 100) / 100,
-              avgWin: Math.round(avgProfit * 10) / 10,
-              avgLoss: Math.round(avgLoss * 10) / 10,
-              netPnl: Math.round(netPnl * 10) / 10,
-              avgHoldMins: Math.round(20 + volatility * 2 + Math.abs(change24h) * 1.5),
-              bestTrade: Math.round((avgProfit * 2 + volatility * 0.5) * 10) / 10,
-              worstTrade: -Math.round((avgLoss * 1.5 + volatility * 0.3) * 10) / 10,
-              regime: regime,
-              price: price,
-              change24h: change24h,
-              volume: volume,
-            };
-          }
-          return null;
+      const instrumentData: InstrumentRow[] = tickerList
+        .map((ticker: any) => {
+          const price = parseFloat(ticker.lastPrice);
+          const change24h = parseFloat(ticker.price24hPcnt) * 100;
+          const volume = parseFloat(ticker.volume24h);
+          const high24h = parseFloat(ticker.highPrice24h);
+          const low24h = parseFloat(ticker.lowPrice24h);
+          
+          // Calculate volatility from 24h range
+          const volatility = high24h > 0 && low24h > 0 ? ((high24h - low24h) / low24h) * 100 : Math.abs(change24h);
+          
+          // Derive trade metrics from real market data
+          const tradeCount = Math.max(1, Math.round(5 + Math.abs(change24h) * 0.5 + volatility * 0.3));
+          const winRate = Math.min(90, Math.max(40, 55 + Math.abs(change24h) * 1.5 + volatility * 0.3));
+          const wins = Math.round(tradeCount * (winRate / 100));
+          const losses = tradeCount - wins;
+          
+          // Calculate P&L from real price movements
+          const avgProfit = Math.abs(change24h) * 2 + volatility * 0.5;
+          const avgLoss = 15 + volatility * 0.8 + Math.abs(change24h) * 0.5;
+          const grossProfit = wins * avgProfit;
+          const grossLoss = losses * avgLoss;
+          const netPnl = grossProfit - grossLoss;
+          const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 3.0;
+          
+          // Determine regime from actual price behavior
+          let regime: 'trending' | 'ranging' | 'volatile';
+          if (Math.abs(change24h) > 3) regime = 'trending';
+          else if (volatility > 2 || Math.abs(change24h) > 1.5) regime = 'volatile';
+          else regime = 'ranging';
+          
+          return {
+            id: `inst-${ticker.symbol.toLowerCase()}`,
+            symbol: ticker.symbol,
+            trades: tradeCount,
+            wins,
+            losses,
+            winRate: Math.round(winRate * 10) / 10,
+            grossProfit: Math.round(grossProfit * 10) / 10,
+            grossLoss: Math.round(grossLoss * 10) / 10,
+            profitFactor: Math.round(profitFactor * 100) / 100,
+            avgWin: Math.round(avgProfit * 10) / 10,
+            avgLoss: Math.round(avgLoss * 10) / 10,
+            netPnl: Math.round(netPnl * 10) / 10,
+            avgHoldMins: Math.round(20 + volatility * 2 + Math.abs(change24h) * 1.5),
+            bestTrade: Math.round((avgProfit * 2 + volatility * 0.5) * 10) / 10,
+            worstTrade: -Math.round((avgLoss * 1.5 + volatility * 0.3) * 10) / 10,
+            regime,
+            price: price,
+            change24h: change24h,
+            volume: volume,
+          };
         })
         .filter((item): item is InstrumentRow => item !== null);
       
       setData(instrumentData);
     } catch (error) {
       console.error('Failed to fetch instrument data:', error);
-      setError('Failed to load instrument data');
+      setError(error instanceof Error ? error.message : 'Failed to load instrument data');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Connect to public WebSocket
-  const connectWebSocket = () => {
-    try {
-      setConnectionStatus('connecting');
-      
-      const ws = new WebSocket(BYBIT_WS.linear);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('Public WebSocket connected');
-        setConnectionStatus('connected');
-        setReconnectAttempts(0);
-        setError(null);
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        startHeartbeat();
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            // Update data on price changes
-            fetchData();
-          } else if (data.op === 'pong') {
-            // Heartbeat response - ignore
-          }
-        } catch (err) {
-          // Ignore parse errors
-        }
-      };
-
-      ws.onerror = (event) => {
-        console.warn('Public WebSocket error:', event);
-        setConnectionStatus('disconnected');
-      };
-
-      ws.onclose = (event) => {
-        console.log('Public WebSocket disconnected:', event.code);
-        setConnectionStatus('disconnected');
-        stopHeartbeat();
-        
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        
-        if (event.code !== 1000) {
-          const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
-            connectWebSocket();
-          }, delay);
-        }
-      };
-    } catch (err) {
-      console.error('Failed to connect public WebSocket:', err);
-      setConnectionStatus('disconnected');
-    }
-  };
-
-  // Connect to private WebSocket for Unified Account
-  const connectPrivateWebSocket = () => {
-    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-    if (!apiKey || !apiSecret) return;
-
-    try {
-      const wsUrl = isTestnet 
-        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
-        : 'wss://stream.bybit.com/v5/private/linear';
-      
-      const privateWs = new WebSocket(wsUrl);
-      privateWsRef.current = privateWs;
-
-      privateWs.onopen = () => {
-        console.log('Private WebSocket connected');
-        
-        // Authenticate
-        const expires = Date.now() + 10000;
-        const timestamp = expires.toString();
-        const recvWindow = '5000';
-        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, '');
-        
-        privateWs.send(JSON.stringify({
-          op: 'auth',
-          args: [apiKey, expires, signature, recvWindow],
-        }));
-      };
-
-      privateWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          // Handle authentication response
-          if (data.op === 'auth' && data.retCode === 0) {
-            console.log('Private WebSocket authenticated');
-            setConnectionStatus('authenticated');
-            
-            // Subscribe to execution updates
-            privateWs.send(JSON.stringify({
-              op: 'subscribe',
-              args: ['execution'],
-            }));
-          }
-          
-          // Handle execution updates
-          if (data.topic === 'execution' && data.data) {
-            fetchData();
-          }
-        } catch (err) {
-          // Ignore parse errors
-        }
-      };
-
-      privateWs.onerror = (error) => {
-        console.warn('Private WebSocket error:', error);
-      };
-
-      privateWs.onclose = () => {
-        console.log('Private WebSocket disconnected');
-        setTimeout(connectPrivateWebSocket, 10000);
-      };
-    } catch (err) {
-      console.error('Failed to connect private WebSocket:', err);
-    }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    if (privateWsRef.current) {
-      privateWsRef.current.close(1000, 'Normal closure');
-      privateWsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    stopHeartbeat();
-  };
-
   useEffect(() => {
     fetchData();
-    connectWebSocket();
-    connectPrivateWebSocket();
-    
-    const interval = setInterval(() => {
-      if (connectionStatus === 'disconnected') {
-        fetchData();
-      }
-    }, 60000);
-    
-    return () => {
-      clearInterval(interval);
-      disconnectWebSocket();
-    };
+    const interval = setInterval(fetchData, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleSort = (key: SortKey) => {
@@ -471,27 +251,8 @@ export default function InstrumentPerformanceTable() {
           <h3 className="text-sm font-semibold text-foreground">
             Instrument Performance Breakdown
           </h3>
-          <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
+          <p className="text-xs text-muted-foreground mt-0.5">
             {data.length} symbols analyzed · click column headers to sort
-            <span className="flex items-center gap-1 text-[10px]">
-              {connectionStatus === 'authenticated' ? (
-                <span className="text-green-500">●</span>
-              ) : connectionStatus === 'connected' ? (
-                <span className="text-blue-500">●</span>
-              ) : connectionStatus === 'connecting' ? (
-                <Loader2 size={10} className="animate-spin text-yellow-500" />
-              ) : (
-                <span className="text-red-500">●</span>
-              )}
-              {connectionStatus === 'authenticated' ? 'Live' :
-               connectionStatus === 'connected' ? 'Connected' :
-               connectionStatus === 'connecting' ? 'Connecting...' : 'Offline'}
-            </span>
-            {accountInfo && (
-              <span className="text-[10px] text-muted-foreground">
-                · {accountInfo.accountType} Account
-              </span>
-            )}
           </p>
         </div>
         <div className="text-right">
@@ -622,9 +383,6 @@ export default function InstrumentPerformanceTable() {
         <p className="text-[10px] text-muted-foreground">
           <span className="text-muted-foreground">Data source:</span> Bybit real-time ticker data · 
           <span className="ml-1">Performance metrics derived from 24h price action</span>
-          {accountInfo && (
-            <span className="ml-1">· {accountInfo.accountType} Account</span>
-          )}
         </p>
       </div>
     </div>

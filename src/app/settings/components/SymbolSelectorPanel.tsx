@@ -1,17 +1,9 @@
+// app/components/SymbolSelectorPanel.tsx
+
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { Search, X, TrendingUp, Star, Loader2 } from 'lucide-react';
-
-interface SymbolData {
-  symbol: string;
-  name: string;
-  category: string;
-  volume: string;
-  volumeRaw: number;
-  price: string;
-  change24h: string;
-}
 
 interface SymbolConfig {
   symbol: string;
@@ -23,6 +15,20 @@ interface SymbolConfig {
   change24h: string;
   volumeRaw: number;
 }
+
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+
+// ============== API HELPERS ==============
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
 
 const CATEGORY_COLORS: Record<string, string> = {
   'Major': 'bg-primary/10 text-primary',
@@ -36,47 +42,48 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const DEFAULT_SELECTED = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
 
-// Common categories based on symbol
 const getSymbolCategory = (symbol: string): string => {
   const base = symbol.replace('USDT', '').replace('USDC', '');
   
-  // Major cryptos
   if (['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'DOT', 'LINK', 'AVAX'].includes(base)) {
     return 'Major';
   }
-  
-  // Meme coins
   if (['DOGE', 'SHIB', 'PEPE', 'FLOKI', 'BONK', 'WIF', 'MEME'].includes(base)) {
     return 'Meme';
   }
-  
-  // Layer 2
   if (['ARB', 'OP', 'MATIC', 'BASE', 'STRK', 'MNT'].includes(base)) {
     return 'L2';
   }
-  
-  // DeFi
   if (['UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'RUNE', 'INJ', 'JUP'].includes(base)) {
     return 'DeFi';
   }
-  
-  // AI
   if (['FET', 'AGIX', 'OCEAN', 'RNDR', 'WLD', 'TAO'].includes(base)) {
     return 'AI';
   }
-  
-  // Gaming
   if (['GALA', 'SAND', 'MANA', 'AXS', 'IMX', 'FLOW'].includes(base)) {
     return 'Gaming';
   }
-  
   return 'Alt';
 };
 
-// Bybit API endpoint
-const BYBIT_API = {
-  mainnet: 'https://api.bybit.com',
+// ============== API FUNCTIONS ==============
+
+// Fetch ticker data
+const fetchTickers = async (): Promise<any[]> => {
+  try {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear`);
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list;
+    }
+    return [];
+  } catch (error) {
+    console.error('Error fetching tickers:', error);
+    return [];
+  }
 };
+
+// ============== COMPONENT ==============
 
 export default function SymbolSelectorPanel() {
   const [selected, setSelected] = useState<string[]>(DEFAULT_SELECTED);
@@ -92,40 +99,36 @@ export default function SymbolSelectorPanel() {
     setError(null);
 
     try {
-      const response = await fetch(`${BYBIT_API.mainnet}/v5/market/tickers?category=linear`);
-      const data = await response.json();
-
-      if (data.retCode === 0 && data.result?.list) {
-        const tickers = data.result.list;
-        const defaultEnabled = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
-        
-        // Map all USDT pairs with volume data and proper typing
-        const mappedSymbols: SymbolConfig[] = tickers
-          .filter((t: any) => t.symbol.endsWith('USDT'))
-          .map((t: any) => {
-            const volume = parseFloat(t.volume24h) || 0;
-            const price = parseFloat(t.lastPrice) || 0;
-            const change24h = parseFloat(t.price24hPcnt) * 100 || 0;
-            
-            return {
-              symbol: t.symbol,
-              enabled: defaultEnabled.includes(t.symbol),
-              baseAsset: t.symbol.replace('USDT', ''),
-              quoteAsset: 'USDT',
-              price: price > 1 ? price.toFixed(2) : price.toFixed(4),
-              volume24h: `$${(volume / 1e6).toFixed(1)}M`,
-              change24h: `${change24h.toFixed(2)}%`,
-              volumeRaw: volume,
-            };
-          })
-          .sort((a: SymbolConfig, b: SymbolConfig) => b.volumeRaw - a.volumeRaw);
-
-        // Show top 50 by default, or all if showAll is true
-        const topSymbols = showAll ? mappedSymbols : mappedSymbols.slice(0, 50);
-        setSymbols(topSymbols);
-      } else {
-        throw new Error(data.retMsg || 'Failed to fetch symbols');
+      const tickers = await fetchTickers();
+      
+      if (tickers.length === 0) {
+        throw new Error('No symbols available');
       }
+
+      const defaultEnabled = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+      
+      const mappedSymbols: SymbolConfig[] = tickers
+        .filter((t: any) => t.symbol.endsWith('USDT'))
+        .map((t: any) => {
+          const volume = parseFloat(t.volume24h) || 0;
+          const price = parseFloat(t.lastPrice) || 0;
+          const change24h = parseFloat(t.price24hPcnt) * 100 || 0;
+          
+          return {
+            symbol: t.symbol,
+            enabled: defaultEnabled.includes(t.symbol),
+            baseAsset: t.symbol.replace('USDT', ''),
+            quoteAsset: 'USDT',
+            price: price > 1 ? price.toFixed(2) : price.toFixed(4),
+            volume24h: `$${(volume / 1e6).toFixed(1)}M`,
+            change24h: `${change24h.toFixed(2)}%`,
+            volumeRaw: volume,
+          };
+        })
+        .sort((a: SymbolConfig, b: SymbolConfig) => b.volumeRaw - a.volumeRaw);
+
+      const topSymbols = showAll ? mappedSymbols : mappedSymbols.slice(0, 50);
+      setSymbols(topSymbols);
     } catch (err: any) {
       setError(err.message || 'Failed to load symbols');
       setSymbols([]);
@@ -164,14 +167,8 @@ export default function SymbolSelectorPanel() {
     );
   };
 
-  const toggleAll = () => {
-    const allEnabled = symbols.every((s) => s.enabled);
-    setSymbols((prev) => prev.map((s) => ({ ...s, enabled: !allEnabled })));
-  };
-
   const handleSave = () => {
     setSaved(true);
-    // Store selected symbols in localStorage
     localStorage.setItem('selected_symbols', JSON.stringify(selected));
     setTimeout(() => setSaved(false), 2500);
   };
@@ -179,8 +176,6 @@ export default function SymbolSelectorPanel() {
   const filteredSymbols = symbols.filter((s) =>
     s.symbol.toLowerCase().includes(search.toLowerCase())
   );
-
-  const enabledCount = symbols.filter((s) => s.enabled).length;
 
   if (isLoading) {
     return (
@@ -314,8 +309,7 @@ export default function SymbolSelectorPanel() {
       <button
         onClick={handleSave}
         className={`mt-4 w-full py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
-          saved
-            ? 'bg-positive text-white' :'bg-primary hover:bg-primary/90 text-white'
+          saved ? 'bg-positive text-white' : 'bg-primary hover:bg-primary/90 text-white'
         }`}
       >
         {saved ? '✓ Symbols Saved' : `Save ${selected.length} Symbol${selected.length !== 1 ? 's' : ''}`}

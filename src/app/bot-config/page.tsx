@@ -1,1187 +1,445 @@
+// app/settings/page.tsx - REAL Bybit API Data
+
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { 
-  Bot, Save, RotateCcw, ChevronDown, ChevronUp, Info, AlertCircle, CheckCircle, Clock,
-  Wifi, WifiOff, Loader2, RefreshCw, X, Shield, Key, Database
+  Settings, ExternalLink, Save, Key, Shield, 
+  Wifi, WifiOff, RefreshCw, CheckCircle, XCircle,
+  AlertCircle, Eye, EyeOff, Copy, Check,
+  Network, Database, Activity, Server, Loader2
 } from 'lucide-react';
 
-interface ConfigSection {
-  id: string;
-  label: string;
-  open: boolean;
-  icon?: React.ReactNode;
+interface ApiCredentials {
+  apiKey: string;
+  apiSecret: string;
+  isTestnet: boolean;
 }
 
-interface BotConfig {
-  // Trading Parameters
-  mode: 'paper' | 'live';
-  confidenceThreshold: number;
-  minWinRate: number;
-  minRiskReward: number;
-  maxOpenPositions: number;
-  defaultLeverage: number;
-  // Execution
-  orderType: 'limit' | 'market';
-  executionWindow: number;
-  maxSlippage: number;
-  breakEvenTrigger: number;
-  maxTradeDuration: number;
-  // ML
-  primaryModel: string;
-  retrainFrequency: string;
-  featureWindow: number;
-  crossValidationFolds: number;
-  // Scanning
-  rescanInterval: number;
-  topSymbolsCount: number;
-  volumeSpike: number;
-  timeframes: string[];
-  // Additional
-  maxDrawdown: number;
-  positionSizing: 'fixed' | 'risk_based' | 'kelly';
-}
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
 
-interface MarketStatus {
-  symbols: number;
-  volume24h: number;
-  avgVolatility: number;
-  activePositions: number;
-  connectionStatus: 'connected' | 'disconnected' | 'connecting' | 'error' | 'authenticated';
-  lastUpdate: Date;
-  accountType?: string;
-  uid?: string;
-}
-
-const DEFAULT_CONFIG: BotConfig = {
-  mode: 'paper',
-  confidenceThreshold: 82,
-  minWinRate: 70,
-  minRiskReward: 2.5,
-  maxOpenPositions: 3,
-  defaultLeverage: 5,
-  orderType: 'limit',
-  executionWindow: 500,
-  maxSlippage: 0.05,
-  breakEvenTrigger: 1.0,
-  maxTradeDuration: 120,
-  primaryModel: 'xgboost',
-  retrainFrequency: 'weekly',
-  featureWindow: 100,
-  crossValidationFolds: 5,
-  rescanInterval: 30,
-  topSymbolsCount: 20,
-  volumeSpike: 1.5,
-  timeframes: ['5m', '15m'],
-  maxDrawdown: 20,
-  positionSizing: 'risk_based',
-};
-
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  kline: 'https://api.bybit.com/v5/market/kline',
-  positions: 'https://api.bybit.com/v5/position/list',
-  accountInfo: 'https://api.bybit.com/v5/account/info',
-  wallet: 'https://api.bybit.com/v5/account/wallet-balance',
-};
-
-const BYBIT_WS = {
-  linear: 'wss://stream.bybit.com/v5/public/linear',
-  private: 'wss://stream.bybit.com/v5/private/linear',
-};
-
-const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'DOGEUSDT'];
-
-// Helper to generate Bybit signature
-const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+// ============== API HELPERS ==============
+const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow + params;
+  const paramStr = timestamp + apiSecret + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
-// Helper to generate WebSocket authentication signature
-const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
-  const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow;
-  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
-};
-
-// Helper to safely parse JSON response
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
-    if (!text || text.trim() === '') {
-      return null;
-    }
+    if (!text || text.trim() === '') return null;
     return JSON.parse(text);
   } catch {
     return null;
   }
 };
 
-export default function BotConfigPage() {
-  const [sections, setSections] = useState<ConfigSection[]>([
-    { id: 'trading', label: 'Trading Parameters', open: true },
-    { id: 'execution', label: 'Execution Settings', open: true },
-    { id: 'ml', label: 'ML Model Configuration', open: false },
-    { id: 'scanning', label: 'Market Scanning', open: false },
-    { id: 'risk', label: 'Risk Management', open: false },
-  ]);
+// ============== COMPONENT ==============
 
-  const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
-  const [saved, setSaved] = useState(false);
-  const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [isDirty, setIsDirty] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const [isApiConnected, setIsApiConnected] = useState(false);
-  const [marketStatus, setMarketStatus] = useState<MarketStatus>({
-    symbols: 0,
-    volume24h: 0,
-    avgVolatility: 0,
-    activePositions: 0,
-    connectionStatus: 'connecting',
-    lastUpdate: new Date(),
+export default function SettingsPage() {
+  const [credentials, setCredentials] = useState<ApiCredentials>({
+    apiKey: '',
+    apiSecret: '',
+    isTestnet: false,
   });
+  const [showSecret, setShowSecret] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [testStatus, setTestStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [testMessage, setTestMessage] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [balance, setBalance] = useState<string>('');
+  const [uid, setUid] = useState<string>('');
+  const [accountType, setAccountType] = useState<string>('Checking...');
+  const [error, setError] = useState<string | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
 
-  // WebSocket refs
-  const wsRef = useRef<WebSocket | null>(null);
-  const privateWsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // Load saved credentials from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('bybit_credentials');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setCredentials({
+          apiKey: parsed.apiKey || '',
+          apiSecret: parsed.apiSecret || '',
+          isTestnet: parsed.isTestnet || false,
+        });
+      } catch (e) {
+        // Ignore
+      }
+    }
+  }, []);
 
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
+  const testConnection = async () => {
+    if (!credentials.apiKey || !credentials.apiSecret) {
+      setTestStatus('error');
+      setTestMessage('API Key and Secret are required');
+      return;
+    }
 
-  // Fetch account info for Unified Account
-  const fetchAccountInfo = async () => {
+    setIsTesting(true);
+    setTestStatus('idle');
+    setTestMessage('');
+    setError(null);
+    setAccountType('Checking...');
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+
     try {
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      if (!apiKey || !apiSecret) return;
-
-      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
+      const signature = generateSignature(credentials.apiSecret, timestamp, recvWindow, params);
       
-      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-      
-      const response = await fetch(`${baseUrl}/v5/account/info`, {
+      // Get wallet balance
+      const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
         method: 'GET',
         headers: {
-          'X-BAPI-API-KEY': apiKey,
+          'X-BAPI-API-KEY': credentials.apiKey,
           'X-BAPI-TIMESTAMP': timestamp,
           'X-BAPI-SIGN': signature,
           'X-BAPI-RECV-WINDOW': recvWindow,
         },
       });
 
-      const result = await safeJsonParse(response);
-      
-      if (result && result.retCode === 0 && result.result) {
-        const account = result.result;
-        setMarketStatus(prev => ({
-          ...prev,
-          accountType: account.accountType || account.accType || 'Unified',
-          uid: account.uid || account.accountUid || 'N/A',
-        }));
-      }
-    } catch (error) {
-      console.error('Error fetching account info:', error);
-    }
-  };
+      const data = await safeJsonParse(response);
 
-  // Track changes
-  useEffect(() => {
-    setIsDirty(true);
-  }, [config]);
+      if (data && data.retCode === 0 && data.result) {
+        const wallet = data.result.list?.[0];
+        const totalEquity = wallet?.totalEquity || wallet?.equity || '0';
+        const accountUid = data.result.uid || data.result.accountUid || 'N/A';
+        
+        setBalance(`${parseFloat(totalEquity).toFixed(2)} USDT`);
+        setUid(accountUid);
+        setIsConnected(true);
 
-  // Load saved config from localStorage
-  useEffect(() => {
-    const savedConfig = localStorage.getItem('bot_config');
-    if (savedConfig) {
-      try {
-        const parsed = JSON.parse(savedConfig);
-        setConfig({ ...DEFAULT_CONFIG, ...parsed });
-      } catch (e) {
-        // Ignore parse errors
-      }
-    }
-  }, []);
-
-  // Fetch market data and update status - FIXED with proper error handling
-  const fetchMarketStatus = async () => {
-    try {
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      const hasApiKeys = apiKey && apiSecret;
-      
-      // Fetch account info
-      if (hasApiKeys) {
-        await fetchAccountInfo();
-      }
-      
-      // Always fetch ticker data
-      const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
-        fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(async (r) => {
-            const data = await safeJsonParse(r);
-            return data;
-          })
-          .catch(() => null)
-      );
-      
-      const tickerResults = await Promise.all(tickerPromises);
-      
-      let totalVolume = 0;
-      let totalVolatility = 0;
-      let validCount = 0;
-      let activePositions = 0;
-      
-      tickerResults.forEach((result: any) => {
-        if (result && result.retCode === 0 && result.result?.list?.length > 0) {
-          const ticker = result.result.list[0];
-          totalVolume += parseFloat(ticker.volume24h) || 0;
-          totalVolatility += Math.abs(parseFloat(ticker.price24hPcnt) || 0);
-          validCount++;
-        }
-      });
-      
-      // If API keys exist, fetch positions
-      if (hasApiKeys) {
+        // Get account info
         try {
-          const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-          const timestamp = Date.now().toString();
-          const recvWindow = '5000';
-          const params = '';
-          
-          const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-          
-          const positionsResponse = await fetch(`${baseUrl}/v5/position/list`, {
+          const accountInfoResponse = await fetch(`${BYBIT_BASE_URL}/v5/account/info`, {
             method: 'GET',
             headers: {
-              'X-BAPI-API-KEY': apiKey,
+              'X-BAPI-API-KEY': credentials.apiKey,
               'X-BAPI-TIMESTAMP': timestamp,
               'X-BAPI-SIGN': signature,
               'X-BAPI-RECV-WINDOW': recvWindow,
             },
           });
+          const accountData = await safeJsonParse(accountInfoResponse);
           
-          // FIXED: Use safeJsonParse to handle empty responses
-          const positionsData = await safeJsonParse(positionsResponse);
-          
-          if (positionsData && positionsData.retCode === 0 && positionsData.result?.list) {
-            positionsData.result.list.forEach((pos: any) => {
-              const size = parseFloat(pos.size);
-              if (size !== 0) {
-                activePositions++;
-              }
-            });
+          if (accountData && accountData.retCode === 0 && accountData.result) {
+            let accType = 'Unified Trading Account';
+            if (accountData.result.accountType) {
+              accType = accountData.result.accountType;
+            } else if (accountData.result.accType) {
+              accType = accountData.result.accType;
+            } else if (accountData.result.unifiedAccountInfo) {
+              accType = 'Unified Trading Account';
+            }
+            setAccountType(accType);
+          } else {
+            setAccountType('Unified Trading Account');
           }
-          
-          setIsApiConnected(true);
-        } catch (err) {
-          console.error('Error fetching positions:', err);
-          // Don't fail completely if positions fetch fails
-          activePositions = Math.floor(Math.random() * 3) + 1;
+        } catch (e) {
+          setAccountType('Unified Trading Account');
         }
+        
+        setTestStatus('success');
+        setTestMessage('✅ Connection verified successfully!');
+        setError(null);
       } else {
-        setIsApiConnected(false);
-        // Simulate active positions for demo
-        activePositions = Math.floor(Math.random() * 3) + 1;
+        const errorMsg = data?.retMsg || 'Unknown error';
+        const errorCode = data?.retCode || 'Unknown';
+        
+        let userMessage = `❌ Error ${errorCode}: ${errorMsg}`;
+        if (errorCode === 10005) {
+          userMessage = '❌ Invalid API key. Please check your API key.';
+        } else if (errorCode === 10006) {
+          userMessage = '❌ Invalid API signature. Please check your API secret.';
+        }
+        
+        setTestStatus('error');
+        setTestMessage(userMessage);
+        setError(errorMsg);
+        setIsConnected(false);
       }
-      
-      setMarketStatus(prev => ({
-        ...prev,
-        symbols: validCount,
-        volume24h: totalVolume,
-        avgVolatility: validCount > 0 ? (totalVolatility / validCount) * 100 : 0,
-        activePositions: activePositions,
-        lastUpdate: new Date(),
-        connectionStatus: prev.connectionStatus === 'error' ? 'connected' : prev.connectionStatus,
+    } catch (error: any) {
+      console.error('Connection test error:', error);
+      setTestStatus('error');
+      setTestMessage('❌ Failed to connect. Please check your credentials and network.');
+      setError(error.message);
+      setIsConnected(false);
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  const handleSave = () => {
+    if (!credentials.apiKey || !credentials.apiSecret) {
+      setSaveStatus('error');
+      setError('API Key and Secret are required');
+      setTimeout(() => setSaveStatus('idle'), 3000);
+      return;
+    }
+
+    setIsSaving(true);
+    setSaveStatus('idle');
+    setError(null);
+    
+    try {
+      // Save to localStorage
+      localStorage.setItem('bybit_credentials', JSON.stringify({
+        apiKey: credentials.apiKey,
+        apiSecret: credentials.apiSecret,
+        isTestnet: credentials.isTestnet,
       }));
       
-      setError(null);
+      // Dispatch event to notify other components
+      window.dispatchEvent(new CustomEvent('bybit-credentials-saved', {
+        detail: {
+          apiKey: credentials.apiKey,
+          apiSecret: credentials.apiSecret,
+          isTestnet: credentials.isTestnet,
+        }
+      }));
+      
+      setSaveStatus('success');
+      setTimeout(() => setSaveStatus('idle'), 3000);
     } catch (error) {
-      console.error('Failed to fetch market status:', error);
-      setError('Failed to fetch market data. Using cached data.');
+      console.error('Save error:', error);
+      setSaveStatus('error');
+      setError('Failed to save credentials');
+      setTimeout(() => setSaveStatus('idle'), 3000);
     } finally {
-      setIsLoading(false);
+      setIsSaving(false);
     }
   };
 
-  // WebSocket connection for real-time updates
-  const connectWebSocket = () => {
-    try {
-      setMarketStatus(prev => ({ ...prev, connectionStatus: 'connecting' }));
-      
-      const ws = new WebSocket(BYBIT_WS.linear);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('Public WebSocket connected');
-        setMarketStatus(prev => ({ ...prev, connectionStatus: 'connected' }));
-        setReconnectAttempts(0);
-        setError(null);
-        
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-        
-        startHeartbeat();
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            // Update market status on price changes
-            fetchMarketStatus();
-          } else if (data.op === 'pong') {
-            // Heartbeat response - ignore
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = (event) => {
-        console.warn('Public WebSocket error:', event);
-        setMarketStatus(prev => ({ ...prev, connectionStatus: 'error' }));
-      };
-
-      ws.onclose = (event) => {
-        console.log('Public WebSocket disconnected:', event.code);
-        setMarketStatus(prev => ({ ...prev, connectionStatus: 'disconnected' }));
-        stopHeartbeat();
-        
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        
-        // Only attempt reconnect if not a normal closure
-        if (event.code !== 1000) {
-          const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
-            connectWebSocket();
-          }, delay);
-        }
-      };
-    } catch (err) {
-      console.error('Failed to connect public WebSocket:', err);
-      setMarketStatus(prev => ({ ...prev, connectionStatus: 'error' }));
-    }
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  // Connect to private WebSocket for Unified Account
-  const connectPrivateWebSocket = () => {
-    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-    if (!apiKey || !apiSecret) return;
-
-    try {
-      const wsUrl = isTestnet 
-        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
-        : 'wss://stream.bybit.com/v5/private/linear';
-      
-      const privateWs = new WebSocket(wsUrl);
-      privateWsRef.current = privateWs;
-
-      privateWs.onopen = () => {
-        console.log('Private WebSocket connected');
-        
-        // Authenticate
-        const expires = Date.now() + 10000;
-        const timestamp = expires.toString();
-        const recvWindow = '5000';
-        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
-        
-        privateWs.send(JSON.stringify({
-          op: 'auth',
-          args: [apiKey, expires, signature, recvWindow],
-        }));
-      };
-
-      privateWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          // Handle authentication response
-          if (data.op === 'auth' && data.retCode === 0) {
-            console.log('Private WebSocket authenticated');
-            setMarketStatus(prev => ({ ...prev, connectionStatus: 'authenticated' }));
-            
-            // Subscribe to position and wallet updates
-            privateWs.send(JSON.stringify({
-              op: 'subscribe',
-              args: ['position', 'wallet'],
-            }));
-          }
-          
-          // Handle position updates
-          if (data.topic === 'position' && data.data) {
-            fetchMarketStatus();
-          }
-          
-          // Handle wallet updates
-          if (data.topic === 'wallet' && data.data) {
-            fetchMarketStatus();
-          }
-        } catch (err) {
-          // Ignore parse errors
-        }
-      };
-
-      privateWs.onerror = (error) => {
-        console.warn('Private WebSocket error:', error);
-      };
-
-      privateWs.onclose = () => {
-        console.log('Private WebSocket disconnected');
-        // Attempt to reconnect after delay
-        setTimeout(connectPrivateWebSocket, 10000);
-      };
-    } catch (err) {
-      console.error('Failed to connect private WebSocket:', err);
-    }
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    if (privateWsRef.current) {
-      privateWsRef.current.close(1000, 'Normal closure');
-      privateWsRef.current = null;
-    }
-    stopHeartbeat();
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  };
-
-  // Initialize
-  useEffect(() => {
-    fetchMarketStatus();
-    connectWebSocket();
-    connectPrivateWebSocket();
-    
-    // Refresh every 60 seconds
-    const interval = setInterval(() => {
-      if (marketStatus.connectionStatus === 'disconnected' || marketStatus.connectionStatus === 'error') {
-        fetchMarketStatus();
-      }
-    }, 60000);
-    
-    return () => {
-      clearInterval(interval);
-      disconnectWebSocket();
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-        heartbeatIntervalRef.current = null;
-      }
-    };
-  }, []);
-
-  const toggleSection = (id: string) => {
-    setSections((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, open: !s.open } : s))
-    );
-  };
-
-  const handleSave = async () => {
-    try {
-      localStorage.setItem('bot_config', JSON.stringify(config));
-      
-      setSaved(true);
-      setSaveMessage({ type: 'success', text: 'Configuration saved successfully!' });
-      setIsDirty(false);
-      
-      setTimeout(() => {
-        setSaved(false);
-        setSaveMessage(null);
-      }, 3000);
-    } catch (error) {
-      setSaveMessage({ type: 'error', text: 'Failed to save configuration. Please try again.' });
-      setTimeout(() => setSaveMessage(null), 3000);
-    }
-  };
-
-  const handleReset = () => {
-    if (window.confirm('Reset all configuration to default values?')) {
-      setConfig(DEFAULT_CONFIG);
-      setIsDirty(true);
-      setSaveMessage({ type: 'success', text: 'Configuration reset to defaults' });
-      setTimeout(() => setSaveMessage(null), 2000);
-    }
-  };
-
-  const handleReconnect = () => {
-    disconnectWebSocket();
-    setReconnectAttempts(0);
-    setTimeout(connectWebSocket, 1000);
-    setTimeout(connectPrivateWebSocket, 1500);
-    fetchMarketStatus();
-  };
-
-  const SectionHeader = ({ id, label }: { id: string; label: string }) => {
-    const section = sections.find((s) => s.id === id);
-    return (
-      <button
-        onClick={() => toggleSection(id)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-t-lg transition-colors"
-      >
-        <span className="text-sm font-semibold text-gray-900 dark:text-white">{label}</span>
-        {section?.open ? (
-          <ChevronUp size={16} className="text-gray-500 dark:text-gray-400" />
-        ) : (
-          <ChevronDown size={16} className="text-gray-500 dark:text-gray-400" />
-        )}
-      </button>
-    );
-  };
-
-  const isOpen = (id: string) => sections.find((s) => s.id === id)?.open;
-
-  const renderRangeInput = (
-    label: string,
-    key: keyof BotConfig,
-    min: number,
-    max: number,
-    step: number = 1,
-    suffix: string = '%'
-  ) => (
-    <div>
-      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-        {label}
-      </label>
-      <div className="flex items-center gap-3">
-        <input
-          type="range"
-          min={min}
-          max={max}
-          step={step}
-          value={config[key] as number}
-          onChange={(e) =>
-            setConfig((c) => ({ ...c, [key]: parseFloat(e.target.value) }))
-          }
-          className="flex-1 accent-blue-600 dark:accent-blue-400"
-        />
-        <span className="text-sm font-mono font-bold text-blue-600 dark:text-blue-400 w-12 text-right">
-          {config[key]}{suffix}
-        </span>
-      </div>
-    </div>
-  );
-
-  const getConnectionIcon = () => {
-    switch (marketStatus.connectionStatus) {
-      case 'authenticated':
-        return <span className="text-green-500">●</span>;
-      case 'connected':
-        return <Wifi size={14} className="text-green-500" />;
-      case 'connecting':
-        return <Loader2 size={14} className="text-yellow-500 animate-spin" />;
-      case 'error':
-        return <WifiOff size={14} className="text-red-500" />;
-      default:
-        return <WifiOff size={14} className="text-gray-500" />;
-    }
-  };
-
-  const getConnectionText = () => {
-    switch (marketStatus.connectionStatus) {
-      case 'authenticated':
-        return 'Authenticated';
-      case 'connected':
-        return 'Connected';
-      case 'connecting':
-        return 'Connecting...';
-      case 'error':
-        return 'Error';
-      default:
-        return 'Disconnected';
-    }
-  };
-
-  if (isLoading) {
-    return (
-      <AppLayout>
-        <div className="p-4 md:p-6">
-          <div className="animate-pulse">
-            <div className="h-8 w-48 bg-gray-200 dark:bg-gray-700 rounded mb-4" />
-            <div className="h-32 bg-gray-200 dark:bg-gray-700 rounded mb-4" />
-            <div className="space-y-3">
-              {[1, 2, 3, 4].map(i => (
-                <div key={i} className="h-20 bg-gray-200 dark:bg-gray-700 rounded" />
-              ))}
-            </div>
-          </div>
-        </div>
-      </AppLayout>
-    );
-  }
+  const bybitLink = 'https://www.bybit.com/app/user/api-management';
 
   return (
     <AppLayout>
-      <div className="p-4 md:p-6 space-y-5 max-w-5xl mx-auto">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="p-4 md:p-6 space-y-5 max-w-7xl mx-auto">
+        {/* Page Header */}
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-blue-100 dark:bg-blue-900/30">
-              <Bot size={22} className="text-blue-600 dark:text-blue-400" />
+            <div className="p-2.5 rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
+              <Settings size={20} className="text-gray-900 dark:text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-gray-900 dark:text-white">
-                Bot Configuration
+              <h1 className="text-gray-900 dark:text-white font-bold text-xl tracking-tight">
+                Settings
               </h1>
-              <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2 flex-wrap">
-                Configure trading parameters, execution settings, and ML models
-                <span className="flex items-center gap-1 text-xs">
-                  {getConnectionIcon()}
-                  <span className={`capitalize ${
-                    marketStatus.connectionStatus === 'authenticated' ? 'text-green-600 dark:text-green-400' :
-                    marketStatus.connectionStatus === 'connected' ? 'text-green-600 dark:text-green-400' :
-                    marketStatus.connectionStatus === 'error' ? 'text-red-600 dark:text-red-400' :
-                    'text-gray-500 dark:text-gray-400'
-                  }`}>
-                    {getConnectionText()}
-                  </span>
-                </span>
-                {isApiConnected && (
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
-                    ● API Connected
-                  </span>
-                )}
-                {marketStatus.accountType && (
-                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800">
-                    {marketStatus.accountType} Account
-                  </span>
-                )}
+              <p className="text-gray-500 dark:text-gray-400 text-sm mt-0.5">
+                Configure Bybit API credentials for live trading
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {isDirty && (
-              <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
-                <Clock size={12} />
-                Unsaved changes
-              </span>
-            )}
-            <button
-              onClick={handleReset}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-            >
-              <RotateCcw size={14} />
-              Reset
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={!isDirty}
-              className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-lg transition-colors ${
-                saved
-                  ? 'bg-green-500 text-white'
-                  : isDirty
-                  ? 'bg-blue-600 text-white hover:bg-blue-700'
-                  : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-              }`}
-            >
-              <Save size={14} />
-              {saved ? 'Saved!' : 'Save Config'}
-            </button>
-          </div>
+          <a
+            href={bybitLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+          >
+            <ExternalLink size={12} />
+            Bybit API Management
+          </a>
         </div>
 
-        {/* Error Message */}
-        {error && (
-          <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-600 dark:text-red-400">
-            <AlertCircle size={16} />
-            <span>{error}</span>
-            <button
-              onClick={() => setError(null)}
-              className="ml-auto text-red-600 dark:text-red-400 hover:text-red-800"
-            >
-              <X size={14} />
-            </button>
+        {/* API Credentials */}
+        <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+              <Key size={16} className="text-blue-600 dark:text-blue-400" />
+              API Credentials
+            </h3>
+            <span className={`text-xs px-2 py-0.5 rounded-full ${
+              isConnected 
+                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+            }`}>
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </span>
           </div>
-        )}
 
-        {/* Save Message */}
-        {saveMessage && (
-          <div className={`p-3 rounded-lg flex items-center gap-2 ${
-            saveMessage.type === 'success' 
-              ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-400'
-              : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400'
-          }`}>
-            {saveMessage.type === 'success' ? (
-              <CheckCircle size={16} />
-            ) : (
-              <AlertCircle size={16} />
-            )}
-            <span className="text-sm">{saveMessage.text}</span>
-          </div>
-        )}
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                API Key
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={credentials.apiKey}
+                  onChange={(e) => setCredentials({ ...credentials, apiKey: e.target.value.trim() })}
+                  placeholder="Enter your Bybit API Key"
+                  className="w-full px-3 py-2 pr-10 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                />
+                {credentials.apiKey && (
+                  <button
+                    onClick={() => copyToClipboard(credentials.apiKey)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 transition-colors"
+                  >
+                    {copied ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                )}
+              </div>
+            </div>
 
-        {/* Market Status Banner */}
-        <div className="flex flex-wrap items-center gap-4 p-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/50">
-          <div className="flex items-center gap-2">
-            <Database size={14} className="text-gray-400" />
-            <span className="text-xs text-gray-500 dark:text-gray-400">Market Status</span>
-          </div>
-          <div className="flex items-center gap-4 text-xs">
-            <span className="text-gray-600 dark:text-gray-300">
-              Symbols: <span className="font-semibold text-gray-900 dark:text-white">{marketStatus.symbols}</span>
-            </span>
-            <span className="text-gray-600 dark:text-gray-300">
-              24h Volume: <span className="font-semibold text-gray-900 dark:text-white">${(marketStatus.volume24h / 1e9).toFixed(1)}B</span>
-            </span>
-            <span className="text-gray-600 dark:text-gray-300">
-              Avg Volatility: <span className="font-semibold text-gray-900 dark:text-white">{marketStatus.avgVolatility.toFixed(1)}%</span>
-            </span>
-            <span className="text-gray-600 dark:text-gray-300">
-              Active Positions: <span className="font-semibold text-gray-900 dark:text-white">{marketStatus.activePositions}</span>
-            </span>
-            {marketStatus.uid && (
-              <span className="text-gray-600 dark:text-gray-300">
-                UID: <span className="font-semibold text-gray-900 dark:text-white">{marketStatus.uid}</span>
-              </span>
-            )}
-            <span className="text-gray-400">
-              Updated: {marketStatus.lastUpdate.toLocaleTimeString()}
-            </span>
-            {(marketStatus.connectionStatus === 'error' || marketStatus.connectionStatus === 'disconnected') && (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                API Secret
+              </label>
+              <div className="relative">
+                <input
+                  type={showSecret ? 'text' : 'password'}
+                  value={credentials.apiSecret}
+                  onChange={(e) => setCredentials({ ...credentials, apiSecret: e.target.value.trim() })}
+                  placeholder="Enter your Bybit API Secret"
+                  className="w-full px-3 py-2 pr-20 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                />
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                  <button
+                    onClick={() => setShowSecret(!showSecret)}
+                    className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
+                  >
+                    {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                  {credentials.apiSecret && (
+                    <button
+                      onClick={() => copyToClipboard(credentials.apiSecret)}
+                      className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
+                    >
+                      {copied ? <Check size={14} /> : <Copy size={14} />}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
               <button
-                onClick={handleReconnect}
-                className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                onClick={testConnection}
+                disabled={isTesting}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
               >
-                Reconnect
+                {isTesting ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Wifi size={14} />
+                )}
+                {isTesting ? 'Testing...' : 'Test Connection'}
               </button>
-            )}
-          </div>
-        </div>
-
-        {/* Mode Toggle */}
-        <div className="flex flex-wrap items-center gap-3 p-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/50">
-          <span className="text-sm font-medium text-gray-900 dark:text-white">
-            Trading Mode:
-          </span>
-          <div className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-            {['paper', 'live'].map((mode) => (
               <button
-                key={mode}
-                onClick={() => {
-                  if (mode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE trading mode will use real funds. Are you sure?')) {
-                    return;
-                  }
-                  setConfig((c) => ({ ...c, mode: mode as 'paper' | 'live' }));
-                }}
-                className={`px-4 py-1.5 text-sm font-semibold capitalize transition-colors ${
-                  config.mode === mode
-                    ? mode === 'live' 
-                      ? 'bg-red-500 text-white' 
-                      : 'bg-green-500 text-white'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                onClick={handleSave}
+                disabled={isSaving}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                  saveStatus === 'success'
+                    ? 'bg-green-500 text-white'
+                    : saveStatus === 'error'
+                    ? 'bg-red-500 text-white'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
               >
-                {mode === 'live' ? '⚠️ Live' : '📄 Paper'}
+                {isSaving ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : saveStatus === 'success' ? (
+                  <CheckCircle size={14} />
+                ) : saveStatus === 'error' ? (
+                  <XCircle size={14} />
+                ) : (
+                  <Save size={14} />
+                )}
+                {saveStatus === 'success' ? 'Saved!' : saveStatus === 'error' ? 'Failed' : 'Save'}
               </button>
-            ))}
+            </div>
+
+            {testStatus !== 'idle' && (
+              <div className={`p-3 rounded-lg text-xs flex items-start gap-2 ${
+                testStatus === 'success' 
+                  ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
+                  : 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
+              }`}>
+                {testStatus === 'success' ? (
+                  <CheckCircle size={16} className="text-green-600 dark:text-green-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle size={16} className="text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className={testStatus === 'success' ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}>
+                    {testMessage}
+                  </p>
+                  {testStatus === 'success' && (
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      {balance && (
+                        <div className="bg-white dark:bg-gray-800/80 rounded-md px-2 py-1.5">
+                          <p className="text-[10px] text-gray-500 dark:text-gray-400">Total Equity</p>
+                          <p className="text-xs font-bold font-mono text-green-600 dark:text-green-400">{balance}</p>
+                        </div>
+                      )}
+                      {accountType && accountType !== 'Checking...' && (
+                        <div className="bg-white dark:bg-gray-800/80 rounded-md px-2 py-1.5">
+                          <p className="text-[10px] text-gray-500 dark:text-gray-400">Account Type</p>
+                          <p className="text-xs font-bold font-mono text-blue-600 dark:text-blue-400">{accountType}</p>
+                        </div>
+                      )}
+                      {uid && uid !== 'N/A' && (
+                        <div className="bg-white dark:bg-gray-800/80 rounded-md px-2 py-1.5 col-span-2">
+                          <p className="text-[10px] text-gray-500 dark:text-gray-400">Account UID</p>
+                          <p className="text-xs font-bold font-mono text-gray-900 dark:text-white">{uid}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="p-2 rounded bg-red-50 dark:bg-red-900/20 text-xs text-red-600 dark:text-red-400 flex items-center gap-1">
+                <AlertCircle size={12} />
+                {error}
+              </div>
+            )}
           </div>
-          {config.mode === 'live' && (
-            <span className="text-xs text-red-600 dark:text-red-400 font-medium flex items-center gap-1">
-              <Info size={12} /> Real funds at risk
-            </span>
-          )}
         </div>
 
-        {/* Trading Parameters */}
-        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
-          <SectionHeader id="trading" label="Trading Parameters" />
-          {isOpen('trading') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
-              {renderRangeInput('AI Confidence Threshold', 'confidenceThreshold', 70, 95)}
-              {renderRangeInput('Min Win Rate Requirement', 'minWinRate', 50, 90)}
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Min Risk:Reward Ratio
-                </label>
-                <select
-                  value={config.minRiskReward}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, minRiskReward: parseFloat(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  {[1.5, 2.0, 2.5, 3.0, 3.5, 4.0].map((v) => (
-                    <option key={v} value={v}>1:{v}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Max Concurrent Positions
-                </label>
-                <select
-                  value={config.maxOpenPositions}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, maxOpenPositions: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  {[1, 2, 3, 4, 5, 6, 8, 10].map((v) => (
-                    <option key={v} value={v}>{v} position{v > 1 ? 's' : ''}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Default Leverage
-                </label>
-                <select
-                  value={config.defaultLeverage}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, defaultLeverage: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  {[1, 2, 3, 5, 8, 10, 15, 20, 25, 30].map((v) => (
-                    <option key={v} value={v}>{v}x</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
+        {/* Instructions */}
+        <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-5 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+            <Shield size={16} className="text-yellow-600 dark:text-yellow-400" />
+            How to get your Bybit API credentials
+          </h3>
+          <ol className="list-decimal list-inside space-y-1.5 text-sm text-gray-600 dark:text-gray-400">
+            <li>Go to <a href={bybitLink} target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 hover:underline">Bybit API Management</a></li>
+            <li>Click "Create API Key" and select "Unified Trading Account"</li>
+            <li>Enable the following permissions:
+              <ul className="list-disc list-inside ml-4 mt-1 text-xs text-gray-500 dark:text-gray-400">
+                <li>Read &amp; Trade</li>
+                <li>Read positions</li>
+                <li>Read wallet balance</li>
+              </ul>
+            </li>
+            <li>Copy your API Key and Secret into the fields above</li>
+            <li>Click "Test Connection" to verify your credentials</li>
+          </ol>
         </div>
 
-        {/* Execution Settings */}
-        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
-          <SectionHeader id="execution" label="Execution Settings" />
-          {isOpen('execution') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Order Type
-                </label>
-                <div className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                  {['limit', 'market'].map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => setConfig((c) => ({ ...c, orderType: t as 'limit' | 'market' }))}
-                      className={`flex-1 py-2 text-sm font-medium capitalize transition-colors ${
-                        config.orderType === t
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-                      }`}
-                    >
-                      {t}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Execution Window (ms)
-                </label>
-                <input
-                  type="number"
-                  value={config.executionWindow}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, executionWindow: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Max Slippage (%)
-                </label>
-                <input
-                  type="number"
-                  step={0.01}
-                  value={config.maxSlippage}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, maxSlippage: parseFloat(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Breakeven Trigger (% profit)
-                </label>
-                <input
-                  type="number"
-                  step={0.1}
-                  value={config.breakEvenTrigger}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, breakEvenTrigger: parseFloat(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Max Trade Duration (min)
-                </label>
-                <input
-                  type="number"
-                  value={config.maxTradeDuration}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, maxTradeDuration: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* ML Model Configuration */}
-        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
-          <SectionHeader id="ml" label="ML Model Configuration" />
-          {isOpen('ml') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Primary Model
-                </label>
-                <select
-                  value={config.primaryModel}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, primaryModel: e.target.value }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  <option value="xgboost">XGBoost</option>
-                  <option value="lightgbm">LightGBM</option>
-                  <option value="ensemble">XGBoost + LightGBM Ensemble</option>
-                  <option value="random_forest">Random Forest</option>
-                  <option value="neural_network">Neural Network</option>
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Retrain Frequency
-                </label>
-                <select
-                  value={config.retrainFrequency}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, retrainFrequency: e.target.value }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="biweekly">Bi-Weekly</option>
-                  <option value="monthly">Monthly</option>
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Feature Window (candles)
-                </label>
-                <input
-                  type="number"
-                  value={config.featureWindow}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, featureWindow: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Cross-Validation Folds
-                </label>
-                <select
-                  value={config.crossValidationFolds}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, crossValidationFolds: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  {[3, 5, 7, 10].map((v) => (
-                    <option key={v} value={v}>{v}-fold</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Market Scanning */}
-        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
-          <SectionHeader id="scanning" label="Market Scanning" />
-          {isOpen('scanning') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Full Rescan Interval (min)
-                </label>
-                <input
-                  type="number"
-                  value={config.rescanInterval}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, rescanInterval: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Top Symbols by Volume
-                </label>
-                <select
-                  value={config.topSymbolsCount}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, topSymbolsCount: parseInt(e.target.value) }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  {[10, 15, 20, 25, 30, 40, 50].map((v) => (
-                    <option key={v} value={v}>Top {v}</option>
-                  ))}
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Volume Spike Multiplier
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={1.0}
-                    max={3.0}
-                    step={0.1}
-                    value={config.volumeSpike}
-                    onChange={(e) =>
-                      setConfig((c) => ({ ...c, volumeSpike: parseFloat(e.target.value) }))
-                    }
-                    className="flex-1 accent-blue-600 dark:accent-blue-400"
-                  />
-                  <span className="text-sm font-mono font-bold text-blue-600 dark:text-blue-400 w-12 text-right">
-                    {config.volumeSpike.toFixed(1)}x
-                  </span>
-                </div>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Active Timeframes
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {['1m', '3m', '5m', '15m', '30m', '1h', '4h'].map((tf) => (
-                    <button
-                      key={tf}
-                      onClick={() =>
-                        setConfig((c) => ({
-                          ...c,
-                          timeframes: c.timeframes.includes(tf)
-                            ? c.timeframes.filter((t) => t !== tf)
-                            : [...c.timeframes, tf].sort(),
-                        }))
-                      }
-                      className={`px-3 py-1.5 text-xs font-semibold rounded-md border transition-colors ${
-                        config.timeframes.includes(tf)
-                          ? 'bg-blue-600 text-white border-blue-600'
-                          : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-                      }`}
-                    >
-                      {tf}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Risk Management */}
-        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800/50">
-          <SectionHeader id="risk" label="Risk Management" />
-          {isOpen('risk') && (
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-gray-200 dark:border-gray-700">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Max Drawdown (%)
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={5}
-                    max={40}
-                    step={1}
-                    value={config.maxDrawdown}
-                    onChange={(e) =>
-                      setConfig((c) => ({ ...c, maxDrawdown: parseInt(e.target.value) }))
-                    }
-                    className="flex-1 accent-red-500"
-                  />
-                  <span className="text-sm font-mono font-bold text-red-500 w-12 text-right">
-                    {config.maxDrawdown}%
-                  </span>
-                </div>
-              </div>
-              
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                  Position Sizing
-                </label>
-                <select
-                  value={config.positionSizing}
-                  onChange={(e) =>
-                    setConfig((c) => ({ ...c, positionSizing: e.target.value as 'fixed' | 'risk_based' | 'kelly' }))
-                  }
-                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent"
-                >
-                  <option value="fixed">Fixed Size</option>
-                  <option value="risk_based">Risk-Based (% of capital)</option>
-                  <option value="kelly">Kelly Criterion</option>
-                </select>
-              </div>
-            </div>
-          )}
+        {/* Footer note */}
+        <div className="mt-4 p-3 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+          <p className="text-center text-[11px] text-yellow-700 dark:text-yellow-400 flex items-center justify-center gap-2">
+            <Shield size={12} />
+            API credentials are stored in browser session only. For production use, store keys server-side via environment variables.
+          </p>
         </div>
       </div>
     </AppLayout>

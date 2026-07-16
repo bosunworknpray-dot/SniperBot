@@ -1,6 +1,9 @@
-// DashboardHeader.tsx
+// app/components/DashboardHeader.tsx
+
+'use client';
+
 import React, { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Bell, Wifi, Loader2, Shield, Key } from 'lucide-react';
+import { RefreshCw, Bell, Wifi, Loader2, Shield } from 'lucide-react';
 
 interface HeaderData {
   status: 'connected' | 'disconnected' | 'connecting' | 'authenticated';
@@ -12,18 +15,75 @@ interface HeaderData {
   isPaperMode?: boolean;
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  marketTime: 'https://api.bybit.com/v5/market/time',
-  accountInfo: 'https://api.bybit.com/v5/account/info',
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
+
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
 };
 
-// Helper to generate Bybit signature
-const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow + params;
+  const paramStr = timestamp + apiSecret + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
+
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+// ============== API FUNCTIONS ==============
+
+// Fetch account info
+const fetchAccountInfo = async (): Promise<{ type: string; uid: string } | null> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) {
+      return { type: 'Demo', uid: 'N/A' };
+    }
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/info`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+
+    if (data?.retCode === 0 && data?.result) {
+      return {
+        type: data.result.accountType || data.result.accType || 'Unified',
+        uid: data.result.uid || data.result.accountUid || 'N/A',
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error('Error fetching account info:', error);
+    return null;
+  }
+};
+
+// ============== COMPONENT ==============
 
 export default function DashboardHeader() {
   const [data, setData] = useState<HeaderData>({
@@ -36,105 +96,55 @@ export default function DashboardHeader() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [unreadAlerts, setUnreadAlerts] = useState(0);
   const [isBotActive, setIsBotActive] = useState(true);
-  
-  // WebSocket refs
+
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
-
-  // Fetch account info for Unified Account
-  const fetchAccountInfo = async () => {
-    try {
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      if (!apiKey || !apiSecret) {
-        setData(prev => ({ ...prev, isPaperMode: true }));
-        return;
-      }
-
-      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
-      
-      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-      
-      const response = await fetch(`${baseUrl}/v5/account/info`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
-
-      const result = await response.json();
-      
-      if (result && result.retCode === 0 && result.result) {
-        const account = result.result;
-        setData(prev => ({
-          ...prev,
-          accountType: account.accountType || account.accType || 'Unified',
-          uid: account.uid || account.accountUid || 'N/A',
-          isPaperMode: false,
-        }));
-      }
-    } catch (error) {
-      console.error('Error fetching account info:', error);
-    }
-  };
-
+  // Fetch connection status
   const fetchConnectionStatus = async () => {
     try {
       const start = Date.now();
-      const response = await fetch(BYBIT_API.marketTime);
+      const response = await fetch(`${BYBIT_BASE_URL}/v5/market/time`);
       const latency = Date.now() - start;
 
       if (response.ok) {
-        const result = await response.json();
-        if (result.retCode === 0) {
+        const result = await safeJsonParse(response);
+        if (result?.retCode === 0) {
+          // Fetch account info
+          const accountInfo = await fetchAccountInfo();
+          
           setData(prev => ({
             ...prev,
             status: wsRef.current?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
             latency,
             lastUpdated: new Date().toLocaleTimeString(),
+            isPaperMode: !accountInfo?.uid || accountInfo.uid === 'N/A',
+            accountType: accountInfo?.type || prev.accountType,
+            uid: accountInfo?.uid || prev.uid,
           }));
-        } else {
-          setData(prev => ({ ...prev, status: 'disconnected' }));
         }
-      } else {
-        setData(prev => ({ ...prev, status: 'disconnected' }));
       }
     } catch (error) {
       setData(prev => ({ ...prev, status: 'disconnected' }));
     }
   };
 
-  // WebSocket connection for real-time updates
+  // Connect WebSocket
   const connectWebSocket = () => {
     try {
-      const ws = new WebSocket('wss://stream.bybit.com/v5/public/linear');
+      const ws = new WebSocket(BYBIT_WS_URL);
       wsRef.current = ws;
 
       ws.onopen = () => {
         console.log('Dashboard WebSocket connected');
         setData(prev => ({ ...prev, status: 'connected' }));
-        
-        // Subscribe to tickers
+
         ws.send(JSON.stringify({
           op: 'subscribe',
           args: ['tickers.BTCUSDT', 'tickers.ETHUSDT', 'tickers.SOLUSDT']
         }));
-        
+
         startHeartbeat();
       };
 
@@ -142,19 +152,16 @@ export default function DashboardHeader() {
         try {
           const data = JSON.parse(event.data);
           if (data.topic === 'tickers') {
-            // Update last updated time
             setData(prev => ({ ...prev, lastUpdated: new Date().toLocaleTimeString() }));
           } else if (data.op === 'pong') {
-            // Update latency
             setData(prev => ({ ...prev, latency: 0 }));
           }
         } catch (err) {
-          // Ignore parse errors
+          // Ignore
         }
       };
 
-      ws.onerror = (error) => {
-        console.warn('Dashboard WebSocket error:', error);
+      ws.onerror = () => {
         setData(prev => ({ ...prev, status: 'disconnected' }));
       };
 
@@ -162,8 +169,7 @@ export default function DashboardHeader() {
         console.log('Dashboard WebSocket disconnected');
         setData(prev => ({ ...prev, status: 'disconnected' }));
         stopHeartbeat();
-        
-        // Attempt to reconnect
+
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
@@ -207,9 +213,8 @@ export default function DashboardHeader() {
 
   useEffect(() => {
     fetchConnectionStatus();
-    fetchAccountInfo();
     connectWebSocket();
-    
+
     const interval = setInterval(fetchConnectionStatus, 30000);
     return () => {
       clearInterval(interval);
@@ -220,7 +225,6 @@ export default function DashboardHeader() {
   const handleRefresh = async () => {
     setIsRefreshing(true);
     await fetchConnectionStatus();
-    await fetchAccountInfo();
     setIsRefreshing(false);
   };
 

@@ -1,3 +1,5 @@
+// app/components/ConfidenceWinRateChartInner.tsx
+
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -22,13 +24,51 @@ interface ConfidenceData {
   avgRR: number;
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  kline: 'https://api.bybit.com/v5/market/kline',
-};
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
 
 const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+
+// ============== API HELPERS ==============
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+// ============== API FUNCTIONS ==============
+
+// Fetch ticker data
+const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => {
+  try {
+    const promises = symbols.map(symbol =>
+      fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`)
+        .then(r => safeJsonParse(r))
+        .catch(() => null)
+    );
+    
+    const results = await Promise.all(promises);
+    const tickers: Record<string, any> = {};
+    
+    results.forEach((data: any) => {
+      if (data?.retCode === 0 && data?.result?.list?.[0]) {
+        const ticker = data.result.list[0];
+        tickers[ticker.symbol] = ticker;
+      }
+    });
+    
+    return tickers;
+  } catch (error) {
+    console.error('Error fetching tickers:', error);
+    return {};
+  }
+};
+
+// ============== COMPONENT ==============
 
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
@@ -58,15 +98,14 @@ export default function ConfidenceWinRateChartInner() {
       setError(null);
 
       // Fetch real market data
-      const promises = SUPPORTED_SYMBOLS.map(s => 
-        fetch(`${BYBIT_API.spot}?category=linear&symbol=${s}`)
-          .then(r => r.json())
-          .catch(() => null)
-      );
+      const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      const tickerList = Object.values(tickers);
       
-      const results = await Promise.all(promises);
+      if (tickerList.length === 0) {
+        throw new Error('No market data available');
+      }
       
-      // Calculate confidence buckets from real data
+      // Initialize confidence buckets
       const buckets: ConfidenceData[] = [
         { bucket: '70–74%', winRate: 0, trades: 0, avgRR: 0 },
         { bucket: '75–79%', winRate: 0, trades: 0, avgRR: 0 },
@@ -76,44 +115,46 @@ export default function ConfidenceWinRateChartInner() {
         { bucket: '95%+', winRate: 0, trades: 0, avgRR: 0 },
       ];
       
-      // Track total data for normalization
-      let totalTrades = 0;
-      let totalWins = 0;
+      // Track bucket sums for averaging
+      const winSums: number[] = new Array(buckets.length).fill(0);
+      const rrSums: number[] = new Array(buckets.length).fill(0);
       
-      results.forEach((result: any) => {
-        if (result && result.retCode === 0 && result.result?.list?.length > 0) {
-          const ticker = result.result.list[0];
-          const change = parseFloat(ticker.price24hPcnt) * 100;
-          const volume = parseFloat(ticker.volume24h);
+      tickerList.forEach((ticker: any) => {
+        const change = parseFloat(ticker.price24hPcnt) * 100;
+        const volume = parseFloat(ticker.volume24h);
+        const high24h = parseFloat(ticker.highPrice24h);
+        const low24h = parseFloat(ticker.lowPrice24h);
+        
+        // Calculate volatility from 24h range
+        const volatility = high24h > 0 && low24h > 0 
+          ? ((high24h - low24h) / low24h) * 100 
+          : Math.abs(change);
+        
+        // Calculate confidence based on real market data
+        const volumeFactor = Math.min(volume / 1e8, 15);
+        const confidence = Math.min(95, 70 + Math.abs(change) * 1.5 + volumeFactor * 0.5);
+        
+        // Determine bucket index
+        const bucketIndex = Math.min(5, Math.floor((confidence - 70) / 5));
+        
+        if (bucketIndex >= 0 && bucketIndex < buckets.length) {
+          // Determine win based on price movement direction and magnitude
+          const isWin = change > 0 && Math.abs(change) > 0.5;
+          const winCount = isWin ? 1 : 0;
           
-          // Calculate confidence based on real market data
-          const volatility = Math.abs(change);
-          const volumeFactor = Math.min(volume / 1e8, 15);
-          const confidence = Math.min(95, 70 + volatility * 1.5 + volumeFactor * 0.5);
+          // Calculate R:R based on volatility
+          const rr = 1.5 + Math.abs(change) * 0.3 + volatility * 0.05;
           
-          // Determine bucket index
-          const bucketIndex = Math.min(5, Math.floor((confidence - 70) / 5));
-          
-          if (bucketIndex >= 0 && bucketIndex < buckets.length) {
-            // Determine win based on price movement direction and magnitude
-            const isWin = change > 0 && volatility > 0.5;
-            const winCount = isWin ? 1 : 0;
-            
-            // Each symbol contributes to the bucket
-            buckets[bucketIndex].trades += 1;
-            buckets[bucketIndex].winRate += winCount;
-            buckets[bucketIndex].avgRR += 1.5 + volatility * 0.3 + volumeFactor * 0.05;
-            
-            totalTrades += 1;
-            if (isWin) totalWins += 1;
-          }
+          buckets[bucketIndex].trades += 1;
+          winSums[bucketIndex] += winCount;
+          rrSums[bucketIndex] += rr;
         }
       });
       
-      // Calculate final values with real data
-      const finalData = buckets.map(b => {
-        const winRate = b.trades > 0 ? Math.round((b.winRate / b.trades) * 100) : 0;
-        const avgRR = b.trades > 0 ? Math.round((b.avgRR / b.trades) * 10) / 10 : 2.0;
+      // Calculate final values from real data
+      const finalData = buckets.map((b, index) => {
+        const winRate = b.trades > 0 ? Math.round((winSums[index] / b.trades) * 100) : 0;
+        const avgRR = b.trades > 0 ? Math.round((rrSums[index] / b.trades) * 10) / 10 : 2.0;
         
         return {
           ...b,
@@ -125,7 +166,7 @@ export default function ConfidenceWinRateChartInner() {
       setData(finalData);
     } catch (error) {
       console.error('Failed to fetch confidence data:', error);
-      setError('Failed to load confidence data');
+      setError(error instanceof Error ? error.message : 'Failed to load confidence data');
     } finally {
       setIsLoading(false);
     }

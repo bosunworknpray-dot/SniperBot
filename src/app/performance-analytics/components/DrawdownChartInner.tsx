@@ -1,3 +1,5 @@
+// app/components/DrawdownChartInner.tsx
+
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -28,10 +30,41 @@ interface DrawdownStats {
   troughPrice: number;
 }
 
-// Bybit API endpoints
-const BYBIT_API = {
-  kline: 'https://api.bybit.com/v5/market/kline',
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+
+// ============== API HELPERS ==============
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 };
+
+// ============== API FUNCTIONS ==============
+
+// Fetch kline data
+const fetchKline = async (symbol: string = 'BTCUSDT', interval: string = '60', limit: number = 72): Promise<any[]> => {
+  try {
+    const response = await fetch(
+      `${BYBIT_BASE_URL}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`
+    );
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list;
+    }
+    return [];
+  } catch (error) {
+    console.error('Error fetching kline data:', error);
+    return [];
+  }
+};
+
+// ============== COMPONENT ==============
 
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
@@ -68,91 +101,83 @@ export default function DrawdownChartInner() {
       setError(null);
 
       // Fetch real kline data for BTCUSDT
-      const response = await fetch(`${BYBIT_API.kline}?category=linear&symbol=BTCUSDT&interval=60&limit=72`);
+      const klines = await fetchKline('BTCUSDT', '60', 72);
       
-      if (!response.ok) {
-        throw new Error('Failed to fetch kline data');
+      if (klines.length === 0) {
+        throw new Error('No kline data available');
       }
       
-      const result = await response.json();
+      // Calculate drawdown from real price data
+      let peak = 0;
+      let maxDrawdown = 0;
+      let currentDrawdown = 0;
+      let peakPrice = 0;
+      let troughPrice = 0;
+      let peakTime = 0;
+      let troughTime = 0;
       
-      if (result.retCode === 0 && result.result?.list) {
-        const klines = result.result.list;
-        
-        // Calculate drawdown from real price data
-        let peak = 0;
-        let maxDrawdown = 0;
-        let currentDrawdown = 0;
-        let peakPrice = 0;
-        let troughPrice = 0;
-        let peakTime = 0;
-        let troughTime = 0;
-        
-        const drawdownData: DrawdownPoint[] = klines.map((k: any, i: number) => {
-          const close = parseFloat(k[4]);
-          const timestamp = parseInt(k[0]);
-          const time = new Date(timestamp).toLocaleString('en-US', { 
-            month: 'short', 
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-          });
-          
-          // Track peak
-          if (close > peak) {
-            peak = close;
-            peakPrice = close;
-            peakTime = timestamp;
-          }
-          
-          // Calculate drawdown from peak
-          const drawdown = peak > 0 ? ((close - peak) / peak) * 100 : 0;
-          
-          // Track max drawdown
-          if (drawdown < maxDrawdown) {
-            maxDrawdown = drawdown;
-            troughPrice = close;
-            troughTime = timestamp;
-          }
-          
-          // Track current drawdown
-          if (i === klines.length - 1) {
-            currentDrawdown = drawdown;
-          }
-          
-          return {
-            time,
-            dd: Math.round(drawdown * 100) / 100,
-          };
+      const drawdownData: DrawdownPoint[] = klines.map((k: any) => {
+        const close = parseFloat(k[4]);
+        const timestamp = parseInt(k[0]);
+        const time = new Date(timestamp).toLocaleString('en-US', { 
+          month: 'short', 
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
         });
         
-        // Calculate recovery time (if recovered)
-        const recoveryTime = maxDrawdown < 0 && peakTime > 0 && troughTime > 0
-          ? Math.round((peakTime - troughTime) / 3600000)
-          : 0;
+        // Track peak
+        if (close > peak) {
+          peak = close;
+          peakPrice = close;
+          peakTime = timestamp;
+        }
         
-        // Calculate limit used based on max drawdown vs 15% limit
-        const limitUsed = maxDrawdown < 0 
-          ? Math.round((Math.abs(maxDrawdown) / 15) * 100 * 10) / 10
-          : 0;
+        // Calculate drawdown from peak
+        const drawdown = peak > 0 ? ((close - peak) / peak) * 100 : 0;
         
-        setData(drawdownData);
-        setStats({
-          maxDD: Math.round(Math.abs(maxDrawdown) * 100) / 100,
-          currentDD: Math.round(currentDrawdown * 100) / 100,
-          recoveryTime: Math.max(0, recoveryTime),
-          limitUsed: Math.min(100, limitUsed),
-          peakPrice: peakPrice,
-          troughPrice: troughPrice,
-        });
+        // Track max drawdown
+        if (drawdown < maxDrawdown) {
+          maxDrawdown = drawdown;
+          troughPrice = close;
+          troughTime = timestamp;
+        }
         
-        setError(null);
-      } else {
-        throw new Error(result.retMsg || 'Failed to fetch kline data');
-      }
+        // Track current drawdown
+        if (drawdown < currentDrawdown) {
+          currentDrawdown = drawdown;
+        }
+        
+        return {
+          time,
+          dd: Math.round(drawdown * 100) / 100,
+        };
+      });
+      
+      // Calculate recovery time (if recovered)
+      const recoveryTime = maxDrawdown < 0 && peakTime > 0 && troughTime > 0
+        ? Math.round((peakTime - troughTime) / 3600000)
+        : 0;
+      
+      // Calculate limit used based on max drawdown vs 15% limit
+      const limitUsed = maxDrawdown < 0 
+        ? Math.round((Math.abs(maxDrawdown) / 15) * 100 * 10) / 10
+        : 0;
+      
+      setData(drawdownData);
+      setStats({
+        maxDD: Math.round(Math.abs(maxDrawdown) * 100) / 100,
+        currentDD: Math.round(currentDrawdown * 100) / 100,
+        recoveryTime: Math.max(0, recoveryTime),
+        limitUsed: Math.min(100, limitUsed),
+        peakPrice: peakPrice,
+        troughPrice: troughPrice,
+      });
+      
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch drawdown data:', error);
-      setError('Failed to load drawdown data');
+      setError(error instanceof Error ? error.message : 'Failed to load drawdown data');
     } finally {
       setIsLoading(false);
     }

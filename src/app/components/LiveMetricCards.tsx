@@ -1,3 +1,5 @@
+// app/components/LiveMetricCards.tsx
+
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -35,43 +37,116 @@ interface LiveMetrics {
   drawdown: { used: number; limit: number; remaining: number };
 }
 
-// Helper to format price with 4 decimal places
-const formatPriceDisplay = (price: number): string => {
-  if (price >= 1000) {
-    return price.toFixed(2);
-  } else if (price >= 1) {
-    return price.toFixed(4);
-  } else {
-    return price.toFixed(6);
-  }
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
 };
 
-// Helper to format currency
-const formatCurrency = (value: number, showBalance: boolean = true): string => {
-  if (!showBalance) {
-    return '••••••';
-  }
-  if (Math.abs(value) >= 1000) {
-    return `$${value.toFixed(2)}`;
-  } else if (Math.abs(value) >= 1) {
-    return `$${value.toFixed(4)}`;
-  } else {
-    return `$${value.toFixed(6)}`;
-  }
-};
-
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  wallet: 'https://api.bybit.com/v5/account/wallet-balance',
-};
-
-// Helper to generate Bybit signature
 const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
   const paramStr = timestamp + apiSecret + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
+
+const safeJsonParse = async (response: Response) => {
+  try {
+    const text = await response.text();
+    if (!text || text.trim() === '') return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+// ============== API FUNCTIONS ==============
+
+// Fetch real balance
+const fetchRealBalance = async (): Promise<number> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) return 100;
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list?.[0]) {
+      const totalEquity = parseFloat(data.result.list[0].totalEquity || '0');
+      if (totalEquity > 0) return totalEquity;
+    }
+    return 100;
+  } catch (error) {
+    console.error('Error fetching balance:', error);
+    return 100;
+  }
+};
+
+// Fetch ticker data
+const fetchTicker = async (symbol: string = 'BTCUSDT'): Promise<any> => {
+  try {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`);
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list?.[0]) {
+      return data.result.list[0];
+    }
+    return null;
+  } catch (error) {
+    console.error('Error fetching ticker:', error);
+    return null;
+  }
+};
+
+// Fetch positions count
+const fetchPositionsCount = async (): Promise<number> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) return 0;
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list.filter((pos: any) => parseFloat(pos.size) !== 0).length;
+    }
+    return 0;
+  } catch (error) {
+    console.error('Error fetching positions:', error);
+    return 0;
+  }
+};
+
+// ============== COMPONENT ==============
 
 function MetricCard({
   title,
@@ -100,14 +175,7 @@ function MetricCard({
       : variant === 'warning' ? 'text-warning' : 'text-foreground';
 
   return (
-    <div
-      className={`
-        card-surface p-5 flex flex-col gap-3
-        ${variantBorder}
-        ${span === 2 ? 'col-span-2' : ''}
-        hover:border-primary/20 transition-colors duration-200
-      `}
-    >
+    <div className={`card-surface p-5 flex flex-col gap-3 ${variantBorder} ${span === 2 ? 'col-span-2' : ''} hover:border-primary/20 transition-colors duration-200`}>
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
           {title}
@@ -119,32 +187,17 @@ function MetricCard({
 
       <div className="flex items-end justify-between gap-2">
         <div>
-          <p
-            className={`text-2xl font-bold font-tabular leading-none ${valueColor} ${
-              mono ? 'font-mono' : ''
-            }`}
-          >
+          <p className={`text-2xl font-bold font-tabular leading-none ${valueColor} ${mono ? 'font-mono' : ''}`}>
             {value}
           </p>
           {subValue && (
-            <p className="text-xs text-muted-foreground mt-1 font-tabular">
-              {subValue}
-            </p>
+            <p className="text-xs text-muted-foreground mt-1 font-tabular">{subValue}</p>
           )}
         </div>
 
         {change && (
-          <div
-            className={`flex items-center gap-1 text-xs font-semibold font-tabular px-2 py-1 rounded-full ${
-              changePositive
-                ? 'bg-positive-subtle text-positive' : 'bg-negative-subtle text-negative'
-            }`}
-          >
-            {changePositive ? (
-              <TrendingUp size={11} />
-            ) : (
-              <TrendingDown size={11} />
-            )}
+          <div className={`flex items-center gap-1 text-xs font-semibold font-tabular px-2 py-1 rounded-full ${changePositive ? 'bg-positive-subtle text-positive' : 'bg-negative-subtle text-negative'}`}>
+            {changePositive ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
             {change}
           </div>
         )}
@@ -162,115 +215,49 @@ export default function LiveMetricCards() {
   const [isConnected, setIsConnected] = useState(false);
   const [mode, setMode] = useState<'paper' | 'live'>('paper');
 
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
-
-  // Fetch Bybit balance
-  const fetchBybitBalance = async (): Promise<number | null> => {
-    try {
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      
-      if (!apiKey || !apiSecret) {
-        console.log('No API credentials found, using demo mode');
-        return null;
-      }
-
-      const baseUrl = isTestnet 
-        ? 'https://api-testnet.bybit.com' 
-        : 'https://api.bybit.com';
-      
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
-      
-      const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
-      
-      const response = await fetch(`${baseUrl}/v5/account/wallet-balance`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
-
-      const data = await response.json();
-      
-      if (data.retCode === 0 && data.result) {
-        const wallet = data.result.list?.[0];
-        const totalEquity = parseFloat(wallet?.totalEquity || '0');
-        if (totalEquity > 0) {
-          setIsConnected(true);
-          return totalEquity;
-        }
-        return null;
-      } else {
-        console.error('Failed to fetch balance:', data.retMsg);
-        return null;
-      }
-    } catch (error) {
-      console.error('Error fetching balance:', error);
-      return null;
-    }
-  };
-
-  // Fetch market data and calculate metrics
   const fetchMetrics = async () => {
     try {
       setIsLoading(true);
       setError(null);
-      
+
       // Determine which balance to use
       let balance: number;
-      
+
       if (mode === 'live') {
-        // Live mode - fetch real Bybit balance
-        const liveBalance = await fetchBybitBalance();
-        if (liveBalance && liveBalance > 0) {
+        const liveBalance = await fetchRealBalance();
+        if (liveBalance > 0 && liveBalance !== 100) {
           balance = liveBalance;
           setIsConnected(true);
         } else {
-          // Fallback to paper if live balance fails
           balance = 100;
           setIsConnected(false);
           setMode('paper');
         }
       } else {
-        // Paper mode - always $100 virtual
         balance = 100;
         setIsConnected(false);
       }
-      
+
       setBaseEquity(balance);
-      
+
       // Fetch ticker data
-      const tickerResponse = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT');
-      const tickerData = await tickerResponse.json();
-      
-      if (tickerData.retCode === 0 && tickerData.result?.list) {
-        const ticker = tickerData.result.list[0];
+      const ticker = await fetchTicker('BTCUSDT');
+      const positionsCount = await fetchPositionsCount();
+
+      if (ticker) {
         const price = parseFloat(ticker.lastPrice);
         const change24h = parseFloat(ticker.price24hPcnt) * 100;
         const volume = parseFloat(ticker.volume24h);
-        
-        // Calculate daily P&L based on price change
+
         const volatility = Math.abs(change24h);
         const multiplier = mode === 'paper' ? 0.5 : 1.0;
         const dailyPnl = balance * (change24h / 100) * 0.3 * multiplier;
         const currentEquity = balance + dailyPnl;
-        
-        // Calculate win rate based on market conditions
-        const winRate = Math.min(85, 55 + volatility * 1.5 + Math.random() * 5);
+
+        const winRate = Math.min(85, 55 + volatility * 1.5);
         const wins = Math.round((winRate / 100) * 15);
         const losses = 15 - wins;
-        
+
         setMetrics({
           equity: {
             value: currentEquity,
@@ -288,18 +275,18 @@ export default function LiveMetricCards() {
             total: 15,
           },
           heat: {
-            pct: Math.min(8, 1 + volatility * 0.3 + Math.random() * 1.5),
-            positions: mode === 'paper' ? Math.floor(1 + Math.random() * 2) : Math.floor(1 + Math.random() * 3),
+            pct: Math.min(8, 1 + volatility * 0.3),
+            positions: positionsCount || Math.floor(1 + Math.random() * 2),
             max: 5,
           },
           sharpe: {
-            ratio: 1.2 + volatility * 0.08 + Math.random() * 0.4,
-            sortino: 1.8 + volatility * 0.08 + Math.random() * 0.4,
+            ratio: 1.2 + volatility * 0.08,
+            sortino: 1.8 + volatility * 0.08,
           },
           drawdown: {
-            used: Math.min(4, Math.abs(change24h) * 0.2 + Math.random() * 0.4),
+            used: Math.min(4, Math.abs(change24h) * 0.2),
             limit: 5.0,
-            remaining: 5.0 - Math.min(4, Math.abs(change24h) * 0.2 + Math.random() * 0.4),
+            remaining: 5.0 - Math.min(4, Math.abs(change24h) * 0.2),
           },
         });
       } else {
@@ -308,45 +295,19 @@ export default function LiveMetricCards() {
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
       setError('Failed to load metrics');
-      
-      // Fallback metrics with current balance
       setMetrics({
-        equity: {
-          value: baseEquity,
-          balance: baseEquity,
-          unrealized: 0,
-        },
-        pnl: {
-          daily: 0,
-          pct: 0,
-        },
-        winrate: {
-          rate: 0,
-          wins: 0,
-          losses: 0,
-          total: 0,
-        },
-        heat: {
-          pct: 0,
-          positions: 0,
-          max: 5,
-        },
-        sharpe: {
-          ratio: 0,
-          sortino: 0,
-        },
-        drawdown: {
-          used: 0,
-          limit: 5.0,
-          remaining: 5.0,
-        },
+        equity: { value: baseEquity, balance: baseEquity, unrealized: 0 },
+        pnl: { daily: 0, pct: 0 },
+        winrate: { rate: 0, wins: 0, losses: 0, total: 0 },
+        heat: { pct: 0, positions: 0, max: 5 },
+        sharpe: { ratio: 0, sortino: 0 },
+        drawdown: { used: 0, limit: 5.0, remaining: 5.0 },
       });
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Toggle between paper and live mode
   const toggleMode = () => {
     const newMode = mode === 'paper' ? 'live' : 'paper';
     if (newMode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE mode will use your real Bybit balance. Are you sure?')) {
@@ -362,12 +323,9 @@ export default function LiveMetricCards() {
     return () => clearInterval(interval);
   }, [mode]);
 
-  // Format currency with 4 decimal places
-  const formatCurrencyDisplay = (value: number) => {
-    if (!showBalance) {
-      return '••••••';
-    }
-    return formatCurrency(value, true);
+  const formatCurrency = (value: number) => {
+    if (!showBalance) return '••••••';
+    return `$${value.toFixed(2)}`;
   };
 
   if (isLoading || !metrics) {
@@ -386,8 +344,8 @@ export default function LiveMetricCards() {
     {
       id: 'metric-equity',
       title: `Account Equity ${mode === 'live' ? (isConnected ? '🟢' : '🔴') : '📄'}`,
-      value: formatCurrencyDisplay(metrics.equity.value),
-      subValue: `Balance: ${formatCurrencyDisplay(metrics.equity.balance)} · Unrealized: ${metrics.equity.unrealized >= 0 ? '+' : ''}${formatCurrencyDisplay(metrics.equity.unrealized)}`,
+      value: formatCurrency(metrics.equity.value),
+      subValue: `Balance: ${formatCurrency(metrics.equity.balance)} · Unrealized: ${metrics.equity.unrealized >= 0 ? '+' : ''}${formatCurrency(metrics.equity.unrealized)}`,
       change: `${(metrics.equity.value / metrics.equity.balance * 100 - 100).toFixed(2)}%`,
       changePositive: metrics.equity.value >= metrics.equity.balance,
       icon: DollarSign,
@@ -398,7 +356,7 @@ export default function LiveMetricCards() {
     {
       id: 'metric-pnl',
       title: "Today's P&L",
-      value: `${metrics.pnl.daily >= 0 ? '+' : ''}${formatCurrencyDisplay(metrics.pnl.daily)}`,
+      value: `${metrics.pnl.daily >= 0 ? '+' : ''}${formatCurrency(metrics.pnl.daily)}`,
       subValue: `${metrics.pnl.pct >= 0 ? '+' : ''}${metrics.pnl.pct.toFixed(2)}% vs open balance`,
       change: `${metrics.pnl.pct >= 0 ? '+' : ''}${metrics.pnl.pct.toFixed(2)}%`,
       changePositive: metrics.pnl.daily >= 0,
@@ -457,51 +415,24 @@ export default function LiveMetricCards() {
             <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Mode:</span>
             <div className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
               <button
-                onClick={() => {
-                  if (mode === 'live') {
-                    setMode('paper');
-                    fetchMetrics();
-                  } else if (mode === 'paper') {
-                    toggleMode();
-                  }
-                }}
-                className={`px-3 py-1 text-xs font-semibold transition-colors ${
-                  mode === 'paper'
-                    ? 'bg-yellow-500 text-white'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-                }`}
+                onClick={() => { if (mode === 'live') { setMode('paper'); fetchMetrics(); } else { toggleMode(); } }}
+                className={`px-3 py-1 text-xs font-semibold transition-colors ${mode === 'paper' ? 'bg-yellow-500 text-white' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
               >
                 📄 Paper
               </button>
               <button
-                onClick={() => {
-                  if (mode === 'paper') {
-                    toggleMode();
-                  }
-                }}
-                className={`px-3 py-1 text-xs font-semibold transition-colors ${
-                  mode === 'live'
-                    ? 'bg-red-500 text-white'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-                }`}
+                onClick={() => { if (mode === 'paper') { toggleMode(); } }}
+                className={`px-3 py-1 text-xs font-semibold transition-colors ${mode === 'live' ? 'bg-red-500 text-white' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
               >
                 ⚡ Live
               </button>
             </div>
           </div>
-          <span className={`text-xs font-medium ${
-            mode === 'live' 
-              ? isConnected ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
-              : 'text-yellow-600 dark:text-yellow-400'
-          }`}>
-            {mode === 'live' 
-              ? isConnected ? '🟢 Connected to Bybit' : '🔴 Not Connected'
-              : '📄 Virtual Balance $100'}
+          <span className={`text-xs font-medium ${mode === 'live' ? isConnected ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400' : 'text-yellow-600 dark:text-yellow-400'}`}>
+            {mode === 'live' ? isConnected ? '🟢 Connected to Bybit' : '🔴 Not Connected' : '📄 Virtual Balance $100'}
           </span>
           {mode === 'live' && !isConnected && (
-            <span className="text-[10px] text-gray-400 dark:text-gray-500">
-              (Set API keys in .env.local)
-            </span>
+            <span className="text-[10px] text-gray-400 dark:text-gray-500">(Set API keys in .env.local)</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -512,9 +443,7 @@ export default function LiveMetricCards() {
           >
             {showBalance ? <EyeOff size={16} className="text-gray-500" /> : <Eye size={16} className="text-gray-500" />}
           </button>
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            Balance: {formatCurrencyDisplay(baseEquity)}
-          </span>
+          <span className="text-xs text-gray-500 dark:text-gray-400">Balance: {formatCurrency(baseEquity)}</span>
         </div>
       </div>
 

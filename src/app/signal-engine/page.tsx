@@ -1,6 +1,8 @@
+// app/signal-engine/page.tsx - REAL Bybit API Data
+
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { 
   Zap, TrendingUp, TrendingDown, RefreshCw, ChevronDown, ChevronUp,
@@ -33,7 +35,6 @@ interface Signal {
   change24h: number;
   price24hHigh: number;
   price24hLow: number;
-  accountType?: string;
 }
 
 interface Indicator {
@@ -43,23 +44,24 @@ interface Indicator {
   category: 'momentum' | 'trend' | 'volatility' | 'volume';
 }
 
-// Helper to format price with 4 decimal places
-const formatPriceDisplay = (price: number): string => {
-  if (price >= 1000) {
-    return price.toFixed(2);
-  } else if (price >= 1) {
-    return price.toFixed(4);
-  } else {
-    return price.toFixed(6);
-  }
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
+
+const SUPPORTED_SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+  'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
+  'MATICUSDT', 'LTCUSDT', 'NEARUSDT', 'APTUSDT', 'ARBUSDT',
+];
+
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
 };
 
-// Helper to format price for display with $ symbol
-const formatPrice = (price: number): string => {
-  return `$${formatPriceDisplay(price)}`;
-};
-
-// Helper to safely parse JSON response
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
@@ -70,240 +72,175 @@ const safeJsonParse = async (response: Response) => {
   }
 };
 
-// Bybit API endpoints
-const BYBIT_API = {
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  kline: 'https://api.bybit.com/v5/market/kline',
-  accountInfo: 'https://api.bybit.com/v5/account/info',
+const formatPrice = (price: number): string => {
+  if (price >= 1000) return price.toFixed(2);
+  if (price >= 1) return price.toFixed(4);
+  return price.toFixed(6);
 };
 
-// WebSocket connection for live data
-const BYBIT_WS = {
-  linear: 'wss://stream.bybit.com/v5/public/linear',
-  private: 'wss://stream.bybit.com/v5/private/linear',
+// ============== API FUNCTIONS ==============
+
+// Fetch ticker data
+const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => {
+  try {
+    const promises = symbols.map(symbol =>
+      fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`)
+        .then(r => safeJsonParse(r))
+        .catch(() => null)
+    );
+    
+    const results = await Promise.all(promises);
+    const tickers: Record<string, any> = {};
+    
+    results.forEach((data: any) => {
+      if (data?.retCode === 0 && data?.result?.list?.[0]) {
+        const ticker = data.result.list[0];
+        tickers[ticker.symbol] = ticker;
+      }
+    });
+    
+    return tickers;
+  } catch (error) {
+    console.error('Error fetching tickers:', error);
+    return {};
+  }
 };
 
-// Supported symbols for scanning
-const SUPPORTED_SYMBOLS = [
-  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-  'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
-  'MATICUSDT', 'LTCUSDT', 'NEARUSDT', 'APTUSDT', 'ARBUSDT',
-];
+// Fetch kline data for technical indicators
+const fetchKline = async (symbol: string, interval: string = '15', limit: number = 100): Promise<any[]> => {
+  try {
+    const response = await fetch(
+      `${BYBIT_BASE_URL}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`
+    );
+    const data = await safeJsonParse(response);
+    
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list;
+    }
+    return [];
+  } catch (error) {
+    console.error(`Error fetching kline for ${symbol}:`, error);
+    return [];
+  }
+};
 
-// Default indicators
-const DEFAULT_INDICATORS: Indicator[] = [
-  { id: 'rsi', label: 'RSI (14)', enabled: true, category: 'momentum' },
-  { id: 'macd', label: 'MACD (12,26,9)', enabled: true, category: 'momentum' },
-  { id: 'bb', label: 'Bollinger Bands (20,2)', enabled: true, category: 'volatility' },
-  { id: 'vwap', label: 'VWAP', enabled: true, category: 'volume' },
-  { id: 'ema9', label: 'EMA 9', enabled: true, category: 'trend' },
-  { id: 'ema20', label: 'EMA 20', enabled: true, category: 'trend' },
-  { id: 'ma50', label: 'MA 50', enabled: true, category: 'trend' },
-  { id: 'ma200', label: 'MA 200', enabled: false, category: 'trend' },
-  { id: 'stochrsi', label: 'Stochastic RSI', enabled: true, category: 'momentum' },
-  { id: 'atr', label: 'ATR (14)', enabled: true, category: 'volatility' },
-];
-
-type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+// ============== COMPONENT ==============
 
 export default function SignalEnginePage() {
-  // State
   const [signals, setSignals] = useState<Signal[]>([]);
-  const [indicators, setIndicators] = useState<Indicator[]>(DEFAULT_INDICATORS);
+  const [indicators] = useState<Indicator[]>([
+    { id: 'rsi', label: 'RSI (14)', enabled: true, category: 'momentum' },
+    { id: 'macd', label: 'MACD (12,26,9)', enabled: true, category: 'momentum' },
+    { id: 'bb', label: 'Bollinger Bands (20,2)', enabled: true, category: 'volatility' },
+    { id: 'vwap', label: 'VWAP', enabled: true, category: 'volume' },
+    { id: 'ema9', label: 'EMA 9', enabled: true, category: 'trend' },
+    { id: 'ema20', label: 'EMA 20', enabled: true, category: 'trend' },
+  ]);
   const [filterStatus, setFilterStatus] = useState<'all' | 'live' | 'pending' | 'rejected' | 'executed'>('all');
   const [filterSymbol, setFilterSymbol] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [showRejected, setShowRejected] = useState(true);
   const [sortBy, setSortBy] = useState<'confidence' | 'time' | 'rr'>('time');
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
+  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('connecting');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [stats, setStats] = useState({
-    live: 0,
-    pending: 0,
-    rejected: 0,
-    avgConfidence: 0,
-  });
+  const [stats, setStats] = useState({ live: 0, pending: 0, rejected: 0, avgConfidence: 0 });
   const [marketData, setMarketData] = useState<Record<string, any>>({});
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
 
-  // Refs
   const wsRef = useRef<WebSocket | null>(null);
-  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
-
-  // Generate WebSocket authentication signature
-  const generateWsSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string) => {
-    const crypto = require('crypto');
-    const paramStr = timestamp + apiKey + recvWindow;
-    return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
-  };
-
-  // Fetch account info for Unified Account
-  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
-    try {
-      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
-      
-      const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
-      
-      const response = await fetch(`${baseUrl}/v5/account/info`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
-      
-      const data = await safeJsonParse(response);
-      
-      if (data && data.retCode === 0 && data.result) {
-        const result = data.result;
-        setAccountInfo({
-          uid: result.uid || result.accountUid || 'N/A',
-          accountType: result.accountType || result.accType || 'Unified',
-        });
-        return true;
-      }
-      return false;
-    } catch (err) {
-      console.error('Error fetching account info:', err);
-      return false;
+  // Calculate technical indicators from kline data
+  const calculateIndicators = (klines: any[]): { rsi: number; macd: { signal: 'bullish' | 'bearish' | 'neutral' }; bb: { position: string } } => {
+    if (!klines || klines.length < 20) {
+      return { rsi: 50, macd: { signal: 'neutral' }, bb: { position: 'middle' } };
     }
-  };
 
-  // Fetch market data and generate signals
-  const fetchMarketDataAndGenerateSignals = async () => {
-    try {
-      setIsLoading(true);
-      const newSignals: Signal[] = [];
-      const marketDataMap: Record<string, any> = {};
+    // Parse close prices
+    const closes = klines.map((k: any) => parseFloat(k[4]));
 
-      // Fetch account info if API keys exist
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      if (apiKey && apiSecret) {
-        await fetchAccountInfo(apiKey, apiSecret, isTestnet);
-      }
-
-      // Fetch data for all symbols
-      const promises = SUPPORTED_SYMBOLS.map(async (symbol) => {
-        try {
-          const response = await fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`);
-          const data = await safeJsonParse(response);
-          
-          if (data && data.retCode === 0 && data.result?.list?.length > 0) {
-            const ticker = data.result.list[0];
-            marketDataMap[symbol] = ticker;
-            
-            // Generate signal based on real market conditions
-            const signal = generateSignalFromData(symbol, ticker);
-            if (signal) {
-              newSignals.push(signal);
-            }
-          }
-        } catch (err) {
-          console.error(`Failed to fetch ${symbol}:`, err);
-        }
-      });
-
-      await Promise.all(promises);
-      
-      setMarketData(marketDataMap);
-      
-      // Merge with existing signals, keeping only active ones
-      const existingActive = signals.filter(s => s.status === 'live' || s.status === 'pending');
-      
-      // Combine and sort by confidence
-      const combined = [...newSignals, ...existingActive];
-      const uniqueSignals = Array.from(
-        new Map(combined.map(s => [s.symbol, s])).values()
-      ).sort((a, b) => b.confidence - a.confidence);
-      
-      setSignals(uniqueSignals.slice(0, 50));
-      setLastUpdate(new Date());
-      setError(null);
-    } catch (err) {
-      console.error('Error fetching market data:', err);
-      setError('Failed to fetch market data. Using cached signals.');
-    } finally {
-      setIsLoading(false);
+    // Calculate RSI
+    let gains = 0, losses = 0;
+    for (let i = 1; i < closes.length; i++) {
+      const diff = closes[i] - closes[i - 1];
+      if (diff >= 0) gains += diff;
+      else losses += Math.abs(diff);
     }
+    const avgGain = gains / closes.length;
+    const avgLoss = losses / closes.length;
+    const rs = avgLoss > 0 ? avgGain / avgLoss : 1;
+    const rsi = 100 - (100 / (1 + rs));
+
+    // Calculate MACD (simplified)
+    const ema12 = closes.slice(-12).reduce((a, b) => a + b, 0) / Math.min(12, closes.length);
+    const ema26 = closes.slice(-26).reduce((a, b) => a + b, 0) / Math.min(26, closes.length);
+    const macdLine = ema12 - ema26;
+    const macdSignal = macdLine > 0 ? 'bullish' : macdLine < 0 ? 'bearish' : 'neutral';
+
+    // Calculate Bollinger Bands (simplified)
+    const last20 = closes.slice(-20);
+    const mean = last20.reduce((a, b) => a + b, 0) / last20.length;
+    const stdDev = Math.sqrt(last20.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / last20.length);
+    const upper = mean + 2 * stdDev;
+    const lower = mean - 2 * stdDev;
+    const currentPrice = closes[closes.length - 1];
+    
+    let bbPosition = 'middle';
+    if (currentPrice > upper) bbPosition = 'upper';
+    else if (currentPrice < lower) bbPosition = 'lower';
+
+    return { rsi, macd: { signal: macdSignal }, bb: { position: bbPosition } };
   };
 
-  // Generate signal from real market data
-  const generateSignalFromData = (symbol: string, ticker: any): Signal | null => {
+  // Generate signal from market data
+  const generateSignalFromData = async (symbol: string, ticker: any): Promise<Signal | null> => {
     const price = parseFloat(ticker.lastPrice);
     const change24h = parseFloat(ticker.price24hPcnt) * 100;
-    const volume24h = parseFloat(ticker.volume24h);
+    const volume = parseFloat(ticker.volume24h);
     const high24h = parseFloat(ticker.highPrice24h);
     const low24h = parseFloat(ticker.lowPrice24h);
-    
+
     // Only generate signal if there's significant movement
     if (Math.abs(change24h) < 0.5) return null;
-    
-    // Calculate RSI approximation from price change
-    const rsi = 50 + (change24h * 2);
-    const clampedRsi = Math.max(0, Math.min(100, rsi));
-    
-    // Determine direction based on price movement and RSI
-    const isLong = change24h > 0 && clampedRsi < 70;
-    const isShort = change24h < 0 && clampedRsi > 30;
-    
-    // Only generate signal if there's a clear direction
+
+    // Fetch kline data for indicators
+    const klines = await fetchKline(symbol, '15', 50);
+    const indicators = calculateIndicators(klines);
+
+    // Determine direction
+    const isLong = change24h > 0 && indicators.rsi < 70;
+    const isShort = change24h < 0 && indicators.rsi > 30;
+
     if (!isLong && !isShort) return null;
-    
-    // Calculate confidence based on multiple factors
-    const volumeFactor = Math.min(volume24h / 100000000, 2);
+
+    // Calculate confidence
+    const volumeFactor = Math.min(volume / 100000000, 2);
     const trendStrength = Math.abs(change24h) / 2;
-    const rsiFactor = isLong ? (70 - clampedRsi) / 70 : (clampedRsi - 30) / 70;
+    const rsiFactor = isLong ? (70 - indicators.rsi) / 70 : (indicators.rsi - 30) / 70;
     
     let confidence = 50 + (trendStrength * 10) + (volumeFactor * 8) + (rsiFactor * 15);
     confidence = Math.min(95, Math.max(55, confidence));
-    
-    // Calculate ATR-like value (using 24h range)
+
+    // Calculate stop loss and take profit levels
     const atr = (high24h - low24h) / 4;
     const entryPrice = price;
     const stopLoss = isLong ? price - atr * 1.5 : price + atr * 1.5;
     const takeProfit1 = isLong ? price + atr * 2.5 : price - atr * 2.5;
     const takeProfit2 = isLong ? price + atr * 4 : price - atr * 4;
-    
-    // Risk-reward ratio
+
     const risk = Math.abs(entryPrice - stopLoss);
     const reward = Math.abs(takeProfit1 - entryPrice);
     const rr = risk > 0 ? reward / risk : 1.5;
-    
-    // Determine regime
+
     const regime = Math.abs(change24h) > 3 ? 'trending' : 
                    Math.abs(change24h) > 1.5 ? 'ranging' : 'volatile';
-    
-    // Determine timeframe based on volatility
     const timeframe = Math.abs(change24h) > 2 ? '15m' : '5m';
-    
-    // Signal source
-    const source = confidence > 80 ? 'hybrid' : 
-                   confidence > 70 ? 'technical' : 'ml';
-    
-    // Determine status
+    const source = confidence > 80 ? 'hybrid' : confidence > 70 ? 'technical' : 'ml';
     const status = confidence > 80 ? 'live' : confidence > 70 ? 'pending' : 'rejected';
-    
+
     return {
       id: `sig-${symbol}-${Date.now()}`,
       symbol,
@@ -316,214 +253,156 @@ export default function SignalEnginePage() {
       rr: Math.round(rr * 10) / 10,
       regime,
       volumeSpike: Math.round(volumeFactor * 10) / 10,
-      rsi: Math.round(clampedRsi),
-      macdSignal: isLong ? 'bullish' : isShort ? 'bearish' : 'neutral',
-      bbPosition: isLong ? 'lower' : isShort ? 'upper' : 'middle',
+      rsi: Math.round(indicators.rsi),
+      macdSignal: indicators.macd.signal,
+      bbPosition: indicators.bb.position,
       timeframe: timeframe as '5m' | '15m',
       status: status as 'live' | 'pending' | 'rejected' | 'executed',
       rejectionReason: status === 'rejected' ? 'Confidence below threshold' : undefined,
       generatedAt: new Date().toLocaleTimeString(),
       timestamp: Date.now(),
-      volume: volume24h,
+      volume: volume,
       signalSource: source as 'ml' | 'technical' | 'hybrid',
-      change24h: change24h,
+      change24h: Math.round(change24h * 10) / 10,
       price24hHigh: high24h,
       price24hLow: low24h,
-      accountType: accountInfo?.accountType || 'Unified',
     };
   };
 
-  // Connect to private WebSocket for real-time signal execution updates
-  const connectPrivateWebSocket = () => {
-    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-    if (!apiKey || !apiSecret) return;
-
+  // Fetch market data and generate signals
+  const fetchMarketDataAndGenerateSignals = useCallback(async () => {
     try {
-      const wsUrl = isTestnet 
-        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
-        : 'wss://stream.bybit.com/v5/private/linear';
-      
-      const privateWs = new WebSocket(wsUrl);
-      privateWsRef.current = privateWs;
+      setIsLoading(true);
+      setError(null);
 
-      privateWs.onopen = () => {
-        console.log('Private WebSocket connected for signals');
-        
-        // Authenticate
-        const expires = Date.now() + 10000;
-        const timestamp = expires.toString();
-        const recvWindow = '5000';
-        const signature = generateWsSignature(apiKey, apiSecret, timestamp, recvWindow);
-        
-        privateWs.send(JSON.stringify({
-          op: 'auth',
-          args: [apiKey, expires, signature, recvWindow],
-        }));
-      };
+      const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      setMarketData(tickers);
 
-      privateWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          // Handle authentication response
-          if (data.op === 'auth' && data.retCode === 0) {
-            console.log('Private WebSocket authenticated for signals');
-            // Subscribe to order updates for signal execution tracking
-            privateWs.send(JSON.stringify({
-              op: 'subscribe',
-              args: ['order', 'execution'],
-            }));
-          }
-          
-          // Handle order updates - refresh signals when orders are executed
-          if (data.topic === 'order' && data.data) {
-            // Refresh signals when there's an order update
-            fetchMarketDataAndGenerateSignals();
-          }
-        } catch (err) {
-          // Ignore parse errors
+      const newSignals: Signal[] = [];
+
+      for (const [symbol, ticker] of Object.entries(tickers)) {
+        const signal = await generateSignalFromData(symbol, ticker);
+        if (signal) {
+          newSignals.push(signal);
         }
-      };
+      }
 
-      privateWs.onerror = (error) => {
-        console.warn('Private WebSocket error (signals):', error);
-      };
+      // Keep existing live/pending signals, add new ones
+      const existingActive = signals.filter(s => s.status === 'live' || s.status === 'pending');
+      
+      // Combine and deduplicate by symbol
+      const combined = [...newSignals, ...existingActive];
+      const uniqueSignals = Array.from(
+        new Map(combined.map(s => [s.symbol, s])).values()
+      ).sort((a, b) => b.confidence - a.confidence);
 
-      privateWs.onclose = () => {
-        console.log('Private WebSocket disconnected (signals)');
-        // Attempt to reconnect after delay
-        setTimeout(connectPrivateWebSocket, 10000);
-      };
-    } catch (err) {
-      console.error('Failed to connect private WebSocket (signals):', err);
+      setSignals(uniqueSignals.slice(0, 50));
+      setLastUpdate(new Date());
+
+    } catch (err: any) {
+      console.error('Error fetching market data:', err);
+      setError(err.message || 'Failed to fetch market data');
+    } finally {
+      setIsLoading(false);
     }
-  };
+  }, [signals]);
 
-  // WebSocket connection for real-time updates
-  const connectWebSocket = () => {
+  // Connect WebSocket
+  const connectWebSocket = useCallback(() => {
     try {
       setConnectionStatus('connecting');
       
-      const ws = new WebSocket(BYBIT_WS.linear);
+      const ws = new WebSocket(BYBIT_WS_URL);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
         setConnectionStatus('connected');
         setError(null);
-        setReconnectAttempts(0);
         
-        // Subscribe to ticker updates for all symbols
-        const subscription = {
+        ws.send(JSON.stringify({
           op: 'subscribe',
           args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        };
-        ws.send(JSON.stringify(subscription));
+        }));
         
-        // Start heartbeat
-        startHeartbeat();
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ op: 'ping' }));
+          }
+        }, 30000);
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          handleWebSocketMessage(data);
+          if (data.topic === 'tickers') {
+            const ticker = data.data;
+            if (ticker && ticker.symbol) {
+              setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
+              // Refresh signals on price update
+              fetchMarketDataAndGenerateSignals();
+            }
+          }
         } catch (err) {
-          // Ignore parse errors for non-JSON messages
+          // Ignore
         }
       };
 
-      ws.onerror = (event) => {
-        // Don't set error state here - onclose will handle reconnection
-        console.warn('WebSocket connection issue:', event);
+      ws.onerror = () => {
+        setConnectionStatus('error');
       };
 
-      ws.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason);
+      ws.onclose = () => {
         setConnectionStatus('disconnected');
-        stopHeartbeat();
-        
-        // Don't show error for normal closures
-        if (event.code !== 1000) {
-          setError('WebSocket disconnected. Reconnecting...');
+        if (heartbeatIntervalRef.current) {
+          clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
         }
-        
-        // Attempt to reconnect with exponential backoff
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
-        
-        const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-        reconnectTimeoutRef.current = setTimeout(() => {
-          setReconnectAttempts(prev => prev + 1);
-          connectWebSocket();
-        }, delay);
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
       };
     } catch (err) {
-      console.error('Failed to connect WebSocket:', err);
       setConnectionStatus('error');
-      setError('Failed to establish WebSocket connection');
     }
-  };
+  }, [fetchMarketDataAndGenerateSignals]);
 
-  const disconnectWebSocket = () => {
+  const disconnectWebSocket = useCallback(() => {
     if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
+      wsRef.current.close();
       wsRef.current = null;
     }
-    if (privateWsRef.current) {
-      privateWsRef.current.close(1000, 'Normal closure');
-      privateWsRef.current = null;
-    }
-    stopHeartbeat();
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-      scanIntervalRef.current = null;
-    }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
     if (heartbeatIntervalRef.current) {
       clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = null;
     }
-  };
+  }, []);
 
-  // Handle incoming WebSocket messages
-  const handleWebSocketMessage = (data: any) => {
-    if (data.topic === 'tickers') {
-      // Update market data and generate signals
-      const ticker = data.data;
-      if (ticker && ticker.symbol) {
-        setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
-        const signal = generateSignalFromData(ticker.symbol, ticker);
-        if (signal) {
-          setSignals(prev => {
-            const filtered = prev.filter(s => s.symbol !== ticker.symbol || s.status === 'executed');
-            return [signal, ...filtered].slice(0, 50);
-          });
-          setLastUpdate(new Date());
-        }
+  // Initialize
+  useEffect(() => {
+    fetchMarketDataAndGenerateSignals();
+    connectWebSocket();
+
+    const interval = setInterval(() => {
+      if (connectionStatus === 'disconnected') {
+        fetchMarketDataAndGenerateSignals();
       }
-    } else if (data.op === 'pong') {
-      // Heartbeat response - ignore
-    }
-  };
+    }, 120000); // Rescan every 2 minutes
+
+    return () => {
+      clearInterval(interval);
+      disconnectWebSocket();
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
+    };
+  }, [fetchMarketDataAndGenerateSignals, connectWebSocket, disconnectWebSocket]);
 
   // Update statistics
   useEffect(() => {
@@ -537,28 +416,6 @@ export default function SignalEnginePage() {
     setStats({ live, pending, rejected, avgConfidence: avgConf });
   }, [signals]);
 
-  // Initialize data and WebSocket
-  useEffect(() => {
-    fetchMarketDataAndGenerateSignals();
-    connectWebSocket();
-    connectPrivateWebSocket();
-
-    // Periodic market scan every 2 minutes
-    scanIntervalRef.current = setInterval(() => {
-      if (connectionStatus === 'disconnected') {
-        fetchMarketDataAndGenerateSignals();
-      }
-    }, 120000);
-
-    return () => {
-      disconnectWebSocket();
-      if (scanIntervalRef.current) {
-        clearInterval(scanIntervalRef.current);
-      }
-    };
-  }, []);
-
-  // Manual rescan
   const handleRescan = async () => {
     setIsScanning(true);
     setError(null);
@@ -566,47 +423,28 @@ export default function SignalEnginePage() {
     try {
       await fetchMarketDataAndGenerateSignals();
       
-      // If WebSocket is disconnected, try to reconnect
       if (connectionStatus === 'disconnected') {
         disconnectWebSocket();
-        setReconnectAttempts(0);
         setTimeout(connectWebSocket, 1000);
       }
-    } catch (err) {
-      setError('Failed to scan market. Please try again.');
+    } catch (err: any) {
+      setError(err.message || 'Failed to scan market');
     } finally {
       setIsScanning(false);
     }
   };
 
-  // Toggle indicator (stored in localStorage)
-  const toggleIndicator = (id: string) => {
-    setIndicators(prev => prev.map(ind => 
-      ind.id === id ? { ...ind, enabled: !ind.enabled } : ind
-    ));
-  };
-
-  // Execute signal (simulated)
-  const handleExecuteSignal = async (id: string) => {
+  const handleExecuteSignal = (id: string) => {
     setSignals(prev => prev.map(s => 
       s.id === id ? { ...s, status: 'executed' } : s
     ));
   };
 
-  // Delete signal
   const handleDeleteSignal = (id: string) => {
     if (!confirm('Delete this signal?')) return;
     setSignals(prev => prev.filter(s => s.id !== id));
   };
 
-  // Reconnect WebSocket manually
-  const handleReconnect = () => {
-    disconnectWebSocket();
-    setReconnectAttempts(0);
-    setTimeout(connectWebSocket, 1000);
-  };
-
-  // Get connection status icon
   const getConnectionIcon = () => {
     switch (connectionStatus) {
       case 'connected': return <Wifi size={14} className="text-green-500" />;
@@ -616,16 +454,40 @@ export default function SignalEnginePage() {
     }
   };
 
-  const getConnectionText = () => {
-    switch (connectionStatus) {
-      case 'connected': return 'Live';
-      case 'connecting': return 'Connecting...';
-      case 'error': return 'Error';
-      default: return 'Disconnected';
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'live': return 'bg-green-500';
+      case 'pending': return 'bg-yellow-500';
+      case 'rejected': return 'bg-red-500';
+      case 'executed': return 'bg-blue-500';
+      default: return 'bg-gray-500';
     }
   };
 
-  // Loading skeleton
+  const getStatusTextColor = (status: string) => {
+    switch (status) {
+      case 'live': return 'text-green-600 dark:text-green-400';
+      case 'pending': return 'text-yellow-600 dark:text-yellow-400';
+      case 'rejected': return 'text-red-600 dark:text-red-400';
+      case 'executed': return 'text-blue-600 dark:text-blue-400';
+      default: return 'text-gray-600 dark:text-gray-400';
+    }
+  };
+
+  // Filtered and sorted signals
+  const filtered = signals
+    .filter(s => filterStatus === 'all' || s.status === filterStatus)
+    .filter(s => showRejected || s.status !== 'rejected')
+    .filter(s => s.symbol.toLowerCase().includes(filterSymbol.toLowerCase()))
+    .sort((a, b) => {
+      switch (sortBy) {
+        case 'confidence': return b.confidence - a.confidence;
+        case 'rr': return b.rr - a.rr;
+        case 'time': return b.timestamp - a.timestamp;
+        default: return 0;
+      }
+    });
+
   if (isLoading && signals.length === 0) {
     return (
       <AppLayout>
@@ -648,40 +510,6 @@ export default function SignalEnginePage() {
     );
   }
 
-  // Filtered and sorted signals
-  const filtered = signals
-    .filter(s => filterStatus === 'all' || s.status === filterStatus)
-    .filter(s => showRejected || s.status !== 'rejected')
-    .filter(s => s.symbol.toLowerCase().includes(filterSymbol.toLowerCase()))
-    .sort((a, b) => {
-      switch (sortBy) {
-        case 'confidence': return b.confidence - a.confidence;
-        case 'rr': return b.rr - a.rr;
-        case 'time': return b.timestamp - a.timestamp;
-        default: return 0;
-      }
-    });
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'live': return 'bg-green-500';
-      case 'pending': return 'bg-yellow-500';
-      case 'rejected': return 'bg-red-500';
-      case 'executed': return 'bg-blue-500';
-      default: return 'bg-gray-500';
-    }
-  };
-
-  const getStatusTextColor = (status: string) => {
-    switch (status) {
-      case 'live': return 'text-green-600 dark:text-green-400';
-      case 'pending': return 'text-yellow-600 dark:text-yellow-400';
-      case 'rejected': return 'text-red-600 dark:text-red-400';
-      case 'executed': return 'text-blue-600 dark:text-blue-400';
-      default: return 'text-gray-600 dark:text-gray-400';
-    }
-  };
-
   return (
     <AppLayout>
       <div className="p-4 md:p-6 space-y-5 max-w-7xl mx-auto">
@@ -692,9 +520,7 @@ export default function SignalEnginePage() {
               <Zap size={22} className="text-blue-600 dark:text-blue-400" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-gray-900 dark:text-white">
-                Signal Engine
-              </h1>
+              <h1 className="text-xl font-bold text-gray-900 dark:text-white">Signal Engine</h1>
               <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
                 AI-powered signal generation from live Bybit data
                 <span className="flex items-center gap-1 text-xs">
@@ -704,19 +530,18 @@ export default function SignalEnginePage() {
                     connectionStatus === 'error' ? 'text-red-600 dark:text-red-400' :
                     'text-gray-500 dark:text-gray-400'
                   }`}>
-                    {getConnectionText()}
+                    {connectionStatus === 'connected' ? 'Live' : 
+                     connectionStatus === 'connecting' ? 'Connecting...' :
+                     connectionStatus === 'error' ? 'Error' : 'Disconnected'}
                   </span>
                 </span>
-                {accountInfo && (
-                  <span className="text-[10px] text-muted-foreground">● {accountInfo.accountType} Account</span>
-                )}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             {connectionStatus === 'error' && (
               <button
-                onClick={handleReconnect}
+                onClick={() => { disconnectWebSocket(); setTimeout(connectWebSocket, 1000); }}
                 className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
               >
                 Reconnect
@@ -741,10 +566,7 @@ export default function SignalEnginePage() {
           <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-600 dark:text-red-400">
             <AlertCircle size={16} />
             <span>{error}</span>
-            <button
-              onClick={() => setError(null)}
-              className="ml-auto text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
-            >
+            <button onClick={() => setError(null)} className="ml-auto">
               <X size={14} />
             </button>
           </div>
@@ -874,11 +696,9 @@ export default function SignalEnginePage() {
                                 <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
                                   {signal.timeframe}
                                 </span>
-                                {signal.signalSource && (
-                                  <span className="text-[10px] px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-gray-600 dark:text-gray-300">
-                                    {signal.signalSource}
-                                  </span>
-                                )}
+                                <span className="text-[10px] px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-gray-600 dark:text-gray-300">
+                                  {signal.signalSource}
+                                </span>
                                 <span className="text-[10px] px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-gray-600 dark:text-gray-300">
                                   {signal.change24h > 0 ? '+' : ''}{signal.change24h.toFixed(1)}%
                                 </span>
@@ -891,7 +711,7 @@ export default function SignalEnginePage() {
                               </div>
                               <div className="flex items-center gap-3 mt-1 flex-wrap">
                                 <span className="text-xs text-gray-500 dark:text-gray-400">
-                                  Entry: <span className="font-mono text-gray-900 dark:text-white">${formatPriceDisplay(signal.entryPrice)}</span>
+                                  Entry: <span className="font-mono text-gray-900 dark:text-white">${formatPrice(signal.entryPrice)}</span>
                                 </span>
                                 <span className="text-xs text-gray-500 dark:text-gray-400">
                                   R:R <span className="font-mono text-gray-900 dark:text-white">1:{signal.rr}</span>
@@ -945,9 +765,9 @@ export default function SignalEnginePage() {
                             )}
                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                               {[
-                                { label: 'Stop Loss', value: `${formatPrice(signal.sl)}`, color: 'text-red-600 dark:text-red-400' },
-                                { label: 'TP1', value: `${formatPrice(signal.tp1)}`, color: 'text-green-600 dark:text-green-400' },
-                                { label: 'TP2', value: `${formatPrice(signal.tp2)}`, color: 'text-green-600 dark:text-green-400' },
+                                { label: 'Stop Loss', value: `$${formatPrice(signal.sl)}`, color: 'text-red-600 dark:text-red-400' },
+                                { label: 'TP1', value: `$${formatPrice(signal.tp1)}`, color: 'text-green-600 dark:text-green-400' },
+                                { label: 'TP2', value: `$${formatPrice(signal.tp2)}`, color: 'text-green-600 dark:text-green-400' },
                               ].map(({ label, value, color }) => (
                                 <div key={label} className="bg-gray-50 dark:bg-gray-800/50 rounded p-2 text-center">
                                   <p className="text-[10px] text-gray-500 dark:text-gray-400">{label}</p>
@@ -1001,44 +821,29 @@ export default function SignalEnginePage() {
             </div>
           </div>
 
-          {/* Indicator Config & Stats */}
+          {/* Sidebar */}
           <div className="space-y-3">
+            {/* Active Indicators */}
             <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
                 <Sparkles size={14} className="text-blue-600 dark:text-blue-400" />
                 Active Indicators
                 <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
-                  {indicators.filter(i => i.enabled).length}/{indicators.length || 10}
+                  {indicators.filter(i => i.enabled).length}/{indicators.length}
                 </span>
               </h3>
-              
-              {(['momentum', 'trend', 'volatility', 'volume'] as const).map((category) => {
-                const categoryIndicators = indicators.filter(ind => ind.category === category);
-                if (categoryIndicators.length === 0) return null;
-                
-                return (
-                  <div key={category} className="mb-3">
-                    <h4 className="text-[10px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-1">
-                      {category}
-                    </h4>
-                    <div className="space-y-1.5">
-                      {categoryIndicators.map((ind) => (
-                        <div key={ind.id} className="flex items-center justify-between py-1">
-                          <span className={`text-xs ${ind.enabled ? 'text-gray-700 dark:text-gray-300' : 'text-gray-400 dark:text-gray-600'}`}>
-                            {ind.label}
-                          </span>
-                          <button
-                            onClick={() => toggleIndicator(ind.id)}
-                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${ind.enabled ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}`}
-                          >
-                            <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${ind.enabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
+              <div className="space-y-2">
+                {indicators.map((ind) => (
+                  <div key={ind.id} className="flex items-center justify-between py-1">
+                    <span className={`text-xs ${ind.enabled ? 'text-gray-700 dark:text-gray-300' : 'text-gray-400 dark:text-gray-600'}`}>
+                      {ind.label}
+                    </span>
+                    <span className={`text-xs ${ind.enabled ? 'text-green-500' : 'text-gray-400'}`}>
+                      {ind.enabled ? '✓' : '✗'}
+                    </span>
                   </div>
-                );
-              })}
+                ))}
+              </div>
             </div>
 
             {/* Connection Stats */}
@@ -1056,16 +861,14 @@ export default function SignalEnginePage() {
                     'text-yellow-600 dark:text-yellow-400'
                   }`}>
                     {getConnectionIcon()}
-                    {getConnectionText()}
+                    {connectionStatus === 'connected' ? 'Live' : 
+                     connectionStatus === 'connecting' ? 'Connecting...' :
+                     connectionStatus === 'error' ? 'Error' : 'Disconnected'}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500 dark:text-gray-400">Total Signals</span>
                   <span className="font-medium text-gray-900 dark:text-white">{signals.length}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500 dark:text-gray-400">Active Indicators</span>
-                  <span className="font-medium text-gray-900 dark:text-white">{indicators.filter(i => i.enabled).length}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500 dark:text-gray-400">Symbols Tracked</span>
@@ -1080,7 +883,7 @@ export default function SignalEnginePage() {
               </div>
             </div>
 
-            {/* Quick Stats */}
+            {/* Signal Summary */}
             <div className="bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Signal Summary</h3>
               <div className="space-y-1.5 text-xs">

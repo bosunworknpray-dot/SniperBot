@@ -1,4 +1,5 @@
-// ConnectionHealthPanel.tsx
+// app/components/ConnectionHealthPanel.tsx
+
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -18,27 +19,11 @@ interface EndpointHealth {
   url: string;
 }
 
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
+
 const INITIAL_ENDPOINTS: EndpointHealth[] = [
-  { 
-    id: 'rest_testnet', 
-    label: 'REST API (Testnet)', 
-    endpoint: 'api-testnet.bybit.com', 
-    mode: 'paper', 
-    status: 'checking', 
-    latency: null, 
-    lastChecked: null,
-    url: 'https://api-testnet.bybit.com/v5/market/time'
-  },
-  { 
-    id: 'ws_testnet', 
-    label: 'WebSocket (Testnet)', 
-    endpoint: 'stream-testnet.bybit.com', 
-    mode: 'paper', 
-    status: 'checking', 
-    latency: null, 
-    lastChecked: null,
-    url: 'wss://stream-testnet.bybit.com/v5/public/spot'
-  },
   { 
     id: 'rest_mainnet', 
     label: 'REST API (Mainnet)', 
@@ -47,7 +32,7 @@ const INITIAL_ENDPOINTS: EndpointHealth[] = [
     status: 'checking', 
     latency: null, 
     lastChecked: null,
-    url: 'https://api.bybit.com/v5/market/time'
+    url: `${BYBIT_BASE_URL}/v5/market/time`
   },
   { 
     id: 'ws_mainnet', 
@@ -57,7 +42,7 @@ const INITIAL_ENDPOINTS: EndpointHealth[] = [
     status: 'checking', 
     latency: null, 
     lastChecked: null,
-    url: 'wss://stream.bybit.com/v5/public/spot'
+    url: BYBIT_WS_URL
   },
   { 
     id: 'time_sync', 
@@ -68,7 +53,7 @@ const INITIAL_ENDPOINTS: EndpointHealth[] = [
     latency: null, 
     lastChecked: null, 
     note: 'Drift < 1000ms required',
-    url: 'https://api.bybit.com/v5/market/time'
+    url: `${BYBIT_BASE_URL}/v5/market/time`
   },
 ];
 

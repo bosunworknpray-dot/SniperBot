@@ -1,3 +1,5 @@
+// app/components/EquitySparkline.tsx
+
 'use client';
 
 import React from 'react';

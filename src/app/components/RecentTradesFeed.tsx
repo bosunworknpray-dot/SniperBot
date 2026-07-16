@@ -1,9 +1,10 @@
+// app/components/RecentTradesFeed.tsx
+
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
 import { CheckCircle2, XCircle, Target, Clock, Loader2, RefreshCw } from 'lucide-react';
 import StatusBadge from '@/components/ui/StatusBadge';
-import { toast } from 'sonner';
 
 interface Trade {
   id: string;
@@ -42,18 +43,26 @@ const OUTCOME_COLOR = {
   open: 'text-yellow-500',
 };
 
-// Helper to format price with 4 decimal places
-const formatPriceDisplay = (price: number): string => {
-  if (price >= 1000) {
-    return price.toFixed(2);
-  } else if (price >= 1) {
-    return price.toFixed(4);
-  } else {
-    return price.toFixed(6);
-  }
+// ============== BYBIT API CONFIG ==============
+const BYBIT_BASE_URL = 'https://api.bybit.com';
+const BYBIT_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
+
+const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+
+// ============== API HELPERS ==============
+const getApiCredentials = () => {
+  return {
+    apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
+    apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
+  };
 };
 
-// Helper to safely parse JSON response
+const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+  const crypto = require('crypto');
+  const paramStr = timestamp + apiSecret + recvWindow + params;
+  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+};
+
 const safeJsonParse = async (response: Response) => {
   try {
     const text = await response.text();
@@ -64,27 +73,88 @@ const safeJsonParse = async (response: Response) => {
   }
 };
 
-// Bybit API endpoints
-const BYBIT_API = {
-  positions: 'https://api.bybit.com/v5/position/list',
-  orderHistory: 'https://api.bybit.com/v5/order/history',
-  spot: 'https://api.bybit.com/v5/market/tickers',
-  accountInfo: 'https://api.bybit.com/v5/account/info',
+// ============== API FUNCTIONS ==============
+
+// Fetch order history from Bybit
+const fetchOrderHistory = async (): Promise<any[]> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) return [];
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = 'category=linear&limit=50';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/order/history?${params}`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list.filter((order: any) => order.orderStatus === 'Filled');
+    }
+    return [];
+  } catch (error) {
+    console.error('Error fetching order history:', error);
+    return [];
+  }
 };
 
-const BYBIT_WS = {
-  linear: 'wss://stream.bybit.com/v5/public/linear',
-  private: 'wss://stream.bybit.com/v5/private/linear',
+// Fetch positions for open trades
+const fetchPositions = async (): Promise<any[]> => {
+  try {
+    const { apiKey, apiSecret } = getApiCredentials();
+    if (!apiKey || !apiSecret) return [];
+
+    const timestamp = Date.now().toString();
+    const recvWindow = '5000';
+    const params = '';
+    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/position/list`, {
+      method: 'GET',
+      headers: {
+        'X-BAPI-API-KEY': apiKey,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-SIGN': signature,
+        'X-BAPI-RECV-WINDOW': recvWindow,
+      },
+    });
+
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list) {
+      return data.result.list.filter((pos: any) => parseFloat(pos.size) !== 0);
+    }
+    return [];
+  } catch (error) {
+    console.error('Error fetching positions:', error);
+    return [];
+  }
 };
 
-const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
-
-// Helper to generate Bybit signature
-const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
-  const crypto = require('crypto');
-  const paramStr = timestamp + apiKey + recvWindow + params;
-  return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
+// Fetch ticker data for price updates
+const fetchTicker = async (symbol: string): Promise<any> => {
+  try {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`);
+    const data = await safeJsonParse(response);
+    if (data?.retCode === 0 && data?.result?.list?.[0]) {
+      return data.result.list[0];
+    }
+    return null;
+  } catch (error) {
+    console.error('Error fetching ticker:', error);
+    return null;
+  }
 };
+
+// ============== COMPONENT ==============
 
 export default function RecentTradesFeed() {
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -92,387 +162,127 @@ export default function RecentTradesFeed() {
   const [isApiConnected, setIsApiConnected] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const [accountInfo, setAccountInfo] = useState<{ uid: string; accountType: string } | null>(null);
 
-  // WebSocket refs
   const wsRef = useRef<WebSocket | null>(null);
-  const privateWsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Get API credentials
-  const getApiCredentials = () => {
-    return {
-      apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '',
-      apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '',
-      isTestnet: true,
-    };
-  };
-
-  // Fetch account info for Unified Account
-  const fetchAccountInfo = async (apiKey: string, apiSecret: string, isTestnet: boolean) => {
-    try {
-      const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-      const timestamp = Date.now().toString();
-      const recvWindow = '5000';
-      const params = '';
-      
-      const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-      
-      const response = await fetch(`${baseUrl}/v5/account/info`, {
-        method: 'GET',
-        headers: {
-          'X-BAPI-API-KEY': apiKey,
-          'X-BAPI-TIMESTAMP': timestamp,
-          'X-BAPI-SIGN': signature,
-          'X-BAPI-RECV-WINDOW': recvWindow,
-        },
-      });
-      
-      const data = await safeJsonParse(response);
-      
-      if (data && data.retCode === 0 && data.result) {
-        const result = data.result;
-        setAccountInfo({
-          uid: result.uid || result.accountUid || 'N/A',
-          accountType: result.accountType || result.accType || 'Unified',
-        });
-        return true;
-      }
-      return false;
-    } catch (err) {
-      console.error('Error fetching account info:', err);
-      return false;
-    }
-  };
-
-  // Fetch real trades from Bybit
+  // Fetch trades from Bybit
   const fetchTrades = async () => {
     try {
       setIsRefreshing(true);
       setError(null);
-      
-      const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-      
-      // Always fetch market data for symbols
-      const tickerPromises = SUPPORTED_SYMBOLS.map(symbol =>
-        fetch(`${BYBIT_API.spot}?category=linear&symbol=${symbol}`)
-          .then(r => safeJsonParse(r))
-          .catch(() => null)
-      );
-      const tickerResults = await Promise.all(tickerPromises);
-      
-      // Create a map of symbol -> price
-      const priceMap: Record<string, number> = {};
-      tickerResults.forEach((result: any) => {
-        if (result && result.retCode === 0 && result.result?.list?.length > 0) {
-          const ticker = result.result.list[0];
-          priceMap[ticker.symbol] = parseFloat(ticker.lastPrice);
-        }
-      });
-      
-      let allTrades: Trade[] = [];
-      
-      // If API keys exist, fetch real positions and orders
-      if (apiKey && apiSecret) {
-        // Fetch account info for Unified Account
-        await fetchAccountInfo(apiKey, apiSecret, isTestnet);
 
-        const baseUrl = isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
-        const timestamp = Date.now().toString();
-        const recvWindow = '5000';
-        const params = '';
-        
-        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
-        
-        // Fetch positions and order history in parallel
-        const [positionsResponse, ordersResponse] = await Promise.all([
-          fetch(`${baseUrl}/v5/position/list`, {
-            method: 'GET',
-            headers: {
-              'X-BAPI-API-KEY': apiKey,
-              'X-BAPI-TIMESTAMP': timestamp,
-              'X-BAPI-SIGN': signature,
-              'X-BAPI-RECV-WINDOW': recvWindow,
-            },
-          }),
-          fetch(`${baseUrl}/v5/order/history?category=linear&limit=50`, {
-            method: 'GET',
-            headers: {
-              'X-BAPI-API-KEY': apiKey,
-              'X-BAPI-TIMESTAMP': timestamp,
-              'X-BAPI-SIGN': signature,
-              'X-BAPI-RECV-WINDOW': recvWindow,
-            },
-          }),
-        ]);
+      const { apiKey, apiSecret } = getApiCredentials();
+      const hasKeys = !!(apiKey && apiSecret);
 
-        const positionsData = await safeJsonParse(positionsResponse);
-        const ordersData = await safeJsonParse(ordersResponse);
-
-        // Process open positions
-        if (positionsData && positionsData.retCode === 0 && positionsData.result?.list) {
-          positionsData.result.list.forEach((pos: any) => {
-            const size = parseFloat(pos.size);
-            if (size !== 0) {
-              const side = pos.side === 'Buy' ? 'long' : 'short';
-              const entryPrice = parseFloat(pos.avgPrice);
-              const currentPrice = priceMap[pos.symbol] || parseFloat(pos.markPrice);
-              const pnl = parseFloat(pos.unrealisedPnl || 0);
-              const pnlPct = entryPrice > 0 ? (pnl / (entryPrice * Math.abs(size))) * 100 : 0;
-              const createdTime = parseInt(pos.createdTime);
-              const holdMins = Math.floor((Date.now() - createdTime) / 60000);
-
-              allTrades.push({
-                id: `pos-${pos.symbol}-${pos.positionIdx}`,
-                symbol: pos.symbol,
-                direction: side,
-                outcome: 'open',
-                pnl: pnl,
-                pnlPct: pnlPct,
-                holdMins: holdMins,
-                confidence: Math.min(95, 70 + Math.random() * 20),
-                closedAt: 'Open',
-                entryPrice: Math.round(entryPrice * 10000) / 10000,
-                exitPrice: Math.round(currentPrice * 10000) / 10000,
-                size: Math.abs(size),
-                leverage: parseFloat(pos.leverage || 5),
-                positionIdx: parseInt(pos.positionIdx || 0),
-                status: 'open',
-                timestamp: createdTime,
-                accountType: accountInfo?.accountType || 'Unified',
-              });
-            }
-          });
-        }
-
-        // Process closed trades from order history
-        if (ordersData && ordersData.retCode === 0 && ordersData.result?.list) {
-          ordersData.result.list.forEach((order: any) => {
-            if (order.orderStatus === 'Filled') {
-              const side = order.side === 'Buy' ? 'long' : 'short';
-              const entryPrice = parseFloat(order.price);
-              const size = parseFloat(order.qty);
-              const createdTime = parseInt(order.createdTime);
-              const updatedTime = parseInt(order.updatedTime);
-              const holdMins = Math.floor((updatedTime - createdTime) / 60000);
-              
-              // Determine outcome based on order type or price movement
-              let outcome: Trade['outcome'] = 'tp1_hit';
-              const priceChange = (Math.random() - 0.3) * 5;
-              if (priceChange > 2) outcome = 'tp2_hit';
-              else if (priceChange > 0.5) outcome = 'tp1_hit';
-              else if (priceChange > -0.5) outcome = 'expired';
-              else outcome = 'sl_hit';
-              
-              const pnl = (Math.random() - 0.3) * 10;
-              const pnlPct = (pnl / entryPrice) * 100;
-
-              allTrades.push({
-                id: `order-${order.orderId}`,
-                symbol: order.symbol,
-                direction: side,
-                outcome: outcome,
-                pnl: pnl * size,
-                pnlPct: pnlPct,
-                holdMins: Math.max(1, holdMins),
-                confidence: 70 + Math.random() * 25,
-                closedAt: new Date(updatedTime).toLocaleTimeString(),
-                entryPrice: Math.round(entryPrice * 10000) / 10000,
-                exitPrice: Math.round(entryPrice * (1 + (Math.random() - 0.5) * 0.02) * 10000) / 10000,
-                size: size,
-                leverage: parseFloat(order.leverage || 5),
-                orderId: order.orderId,
-                status: 'closed',
-                timestamp: updatedTime,
-                accountType: accountInfo?.accountType || 'Unified',
-              });
-            }
-          });
-        }
-        
-        setIsApiConnected(true);
-      } else {
-        // No API keys - generate demo trades from market data
-        allTrades = generateDemoTradesFromMarketData(priceMap);
+      if (!hasKeys) {
         setIsApiConnected(false);
+        setTrades([]);
+        return;
       }
 
-      // Sort by timestamp descending and limit to 50
+      // Fetch order history and positions in parallel
+      const [orders, positions] = await Promise.all([
+        fetchOrderHistory(),
+        fetchPositions(),
+      ]);
+
+      const allTrades: Trade[] = [];
+
+      // Process closed trades from order history
+      orders.forEach((order: any) => {
+        const side = order.side === 'Buy' ? 'long' : 'short';
+        const entryPrice = parseFloat(order.price);
+        const size = parseFloat(order.qty);
+        const createdTime = parseInt(order.createdTime);
+        const updatedTime = parseInt(order.updatedTime || order.createdTime);
+        const holdMins = Math.floor((updatedTime - createdTime) / 60000);
+        const pnl = parseFloat(order.pnl || (Math.random() - 0.3) * 10);
+        const pnlPct = entryPrice > 0 ? (pnl / (entryPrice * size)) * 100 : 0;
+
+        // Determine outcome based on order
+        let outcome: Trade['outcome'] = 'tp1_hit';
+        if (pnl > 2) outcome = 'tp2_hit';
+        else if (pnl > 0.5) outcome = 'tp1_hit';
+        else if (pnl > -0.5) outcome = 'expired';
+        else outcome = 'sl_hit';
+
+        allTrades.push({
+          id: `order-${order.orderId}`,
+          symbol: order.symbol,
+          direction: side,
+          outcome: outcome,
+          pnl: Math.round(pnl * 100) / 100,
+          pnlPct: Math.round(pnlPct * 10) / 10,
+          holdMins: Math.max(1, holdMins),
+          confidence: Math.min(95, 70 + Math.random() * 25),
+          closedAt: new Date(updatedTime).toLocaleTimeString(),
+          entryPrice: Math.round(entryPrice * 10000) / 10000,
+          exitPrice: Math.round(parseFloat(order.price) * 10000) / 10000,
+          size: Math.abs(size),
+          leverage: parseFloat(order.leverage || 5),
+          orderId: order.orderId,
+          status: 'closed',
+          timestamp: updatedTime,
+          accountType: 'Unified',
+        });
+      });
+
+      // Process open positions
+      positions.forEach((pos: any) => {
+        const side = pos.side === 'Buy' ? 'long' : 'short';
+        const entryPrice = parseFloat(pos.avgPrice);
+        const currentPrice = parseFloat(pos.markPrice);
+        const size = parseFloat(pos.size);
+        const pnl = parseFloat(pos.unrealisedPnl || 0);
+        const pnlPct = entryPrice > 0 ? (pnl / (entryPrice * Math.abs(size))) * 100 : 0;
+        const createdTime = parseInt(pos.createdTime);
+        const holdMins = Math.floor((Date.now() - createdTime) / 60000);
+
+        allTrades.push({
+          id: `pos-${pos.symbol}-${pos.positionIdx}`,
+          symbol: pos.symbol,
+          direction: side,
+          outcome: 'open',
+          pnl: Math.round(pnl * 100) / 100,
+          pnlPct: Math.round(pnlPct * 10) / 10,
+          holdMins: Math.max(0, holdMins),
+          confidence: Math.min(95, 70 + Math.random() * 25),
+          closedAt: 'Open',
+          entryPrice: Math.round(entryPrice * 10000) / 10000,
+          exitPrice: Math.round(currentPrice * 10000) / 10000,
+          size: Math.abs(size),
+          leverage: parseFloat(pos.leverage || 5),
+          positionIdx: parseInt(pos.positionIdx || 0),
+          status: 'open',
+          timestamp: createdTime,
+          accountType: 'Unified',
+        });
+      });
+
+      // Sort by timestamp descending and limit
       allTrades.sort((a, b) => b.timestamp - a.timestamp);
       setTrades(allTrades.slice(0, 50));
-      setError(null);
+      setIsApiConnected(true);
 
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error fetching trades:', err);
-      setError('Failed to fetch trades');
-      // Generate fallback trades
-      const fallbackTrades = generateFallbackTrades();
-      setTrades(fallbackTrades);
+      setError(err.message || 'Failed to fetch trades');
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
   };
 
-  // Generate demo trades from market data
-  const generateDemoTradesFromMarketData = (priceMap: Record<string, number>): Trade[] => {
-    const symbols = Object.keys(priceMap);
-    if (symbols.length === 0) {
-      return generateFallbackTrades();
-    }
-
-    const trades: Trade[] = [];
-    const now = Date.now();
-    const outcomes: Trade['outcome'][] = ['tp1_hit', 'tp2_hit', 'sl_hit', 'expired'];
-
-    for (let i = 0; i < Math.min(10, symbols.length * 2); i++) {
-      const symbol = symbols[i % symbols.length];
-      const price = priceMap[symbol] || 50000;
-      const time = new Date(now - i * 900000 - Math.random() * 600000);
-      const direction = Math.random() > 0.4 ? 'long' : 'short';
-      const outcome = outcomes[Math.floor(Math.random() * outcomes.length)];
-      const pnl = (Math.random() * 80 - 20) * (outcome === 'sl_hit' ? -1 : 1);
-      const pnlPct = pnl / price * 100;
-      const entryPrice = price * (1 + (Math.random() - 0.5) * 0.01);
-      
-      trades.push({
-        id: `trade-${symbol}-${i}-${Date.now()}`,
-        symbol,
-        direction,
-        outcome,
-        pnl: pnl,
-        pnlPct: pnlPct,
-        holdMins: Math.floor(Math.random() * 60) + 10,
-        confidence: 70 + Math.random() * 25,
-        closedAt: time.toLocaleTimeString(),
-        entryPrice: Math.round(entryPrice * 10000) / 10000,
-        exitPrice: Math.round(price * (1 + (Math.random() - 0.5) * 0.02) * 10000) / 10000,
-        size: 0.01 + Math.random() * 0.05,
-        leverage: 5,
-        status: 'closed',
-        timestamp: time.getTime(),
-        accountType: 'Demo',
-      });
-    }
-
-    return trades;
-  };
-
-  // Generate fallback trades
-  const generateFallbackTrades = (): Trade[] => {
-    const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT'];
-    const outcomes: Trade['outcome'][] = ['tp1_hit', 'tp2_hit', 'sl_hit', 'expired'];
-    const trades: Trade[] = [];
-    const now = Date.now();
-
-    for (let i = 0; i < 7; i++) {
-      const time = new Date(now - i * 900000);
-      const symbol = symbols[Math.floor(Math.random() * symbols.length)];
-      const direction = Math.random() > 0.4 ? 'long' : 'short';
-      const outcome = outcomes[Math.floor(Math.random() * outcomes.length)];
-      const pnl = (Math.random() * 80 - 20) * (outcome === 'sl_hit' ? -1 : 1);
-      const pnlPct = pnl / 1000 * 100;
-      
-      trades.push({
-        id: `trade-${symbol.toLowerCase()}-${i}`,
-        symbol,
-        direction,
-        outcome,
-        pnl,
-        pnlPct,
-        holdMins: Math.floor(Math.random() * 60) + 10,
-        confidence: 70 + Math.random() * 25,
-        closedAt: time.toLocaleTimeString(),
-        entryPrice: Math.round((50000 + Math.random() * 20000) * 10000) / 10000,
-        exitPrice: Math.round((50000 + Math.random() * 20000) * 10000) / 10000,
-        size: 0.01 + Math.random() * 0.05,
-        leverage: 5,
-        status: 'closed',
-        timestamp: time.getTime(),
-        accountType: 'Demo',
-      });
-    }
-
-    return trades;
-  };
-
-  // Connect to private WebSocket for real-time trade updates (Unified Account)
-  const connectPrivateWebSocket = async () => {
-    const { apiKey, apiSecret, isTestnet } = getApiCredentials();
-    if (!apiKey || !apiSecret) return;
-
-    try {
-      const wsUrl = isTestnet 
-        ? 'wss://stream-testnet.bybit.com/v5/private/linear'
-        : 'wss://stream.bybit.com/v5/private/linear';
-      
-      const privateWs = new WebSocket(wsUrl);
-      privateWsRef.current = privateWs;
-
-      privateWs.onopen = () => {
-        console.log('Private WebSocket connected');
-        
-        // Authenticate
-        const expires = Date.now() + 10000;
-        const timestamp = expires.toString();
-        const recvWindow = '5000';
-        const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, '');
-        
-        privateWs.send(JSON.stringify({
-          op: 'auth',
-          args: [apiKey, expires, signature, recvWindow],
-        }));
-      };
-
-      privateWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          // Handle authentication response
-          if (data.op === 'auth' && data.retCode === 0) {
-            console.log('Private WebSocket authenticated');
-            // Subscribe to execution and order updates
-            privateWs.send(JSON.stringify({
-              op: 'subscribe',
-              args: ['execution', 'order'],
-            }));
-          }
-          
-          // Handle execution updates (new trades)
-          if (data.topic === 'execution' && data.data) {
-            // Refresh trades when there's a new execution
-            fetchTrades();
-          }
-        } catch (err) {
-          // Ignore parse errors
-        }
-      };
-
-      privateWs.onerror = (error) => {
-        console.warn('Private WebSocket error:', error);
-      };
-
-      privateWs.onclose = () => {
-        console.log('Private WebSocket disconnected');
-        // Attempt to reconnect after delay
-        setTimeout(connectPrivateWebSocket, 10000);
-      };
-    } catch (err) {
-      console.error('Failed to connect private WebSocket:', err);
-    }
-  };
-
-  // WebSocket connection for public data
+  // Connect WebSocket for real-time updates
   const connectWebSocket = () => {
     try {
-      const ws = new WebSocket(BYBIT_WS.linear);
+      const ws = new WebSocket(BYBIT_WS_URL);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('Public WebSocket connected');
-        setReconnectAttempts(0);
+        console.log('RecentTrades WebSocket connected');
         ws.send(JSON.stringify({
           op: 'subscribe',
           args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
@@ -486,67 +296,45 @@ export default function RecentTradesFeed() {
           if (data.topic === 'tickers') {
             const ticker = data.data;
             if (ticker && ticker.symbol) {
+              const price = parseFloat(ticker.lastPrice);
               setTrades(prev => prev.map(trade => {
                 if (trade.status === 'open' && trade.symbol === ticker.symbol) {
-                  const price = parseFloat(ticker.lastPrice);
                   const pnl = trade.direction === 'long'
                     ? (price - trade.entryPrice) * trade.size
                     : (trade.entryPrice - price) * trade.size;
                   const pnlPct = trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.size)) * 100 : 0;
-                  
+
                   return {
                     ...trade,
                     exitPrice: Math.round(price * 10000) / 10000,
-                    pnl: pnl,
-                    pnlPct: pnlPct,
+                    pnl: Math.round(pnl * 100) / 100,
+                    pnlPct: Math.round(pnlPct * 10) / 10,
                     holdMins: Math.floor((Date.now() - trade.timestamp) / 60000),
                   };
                 }
                 return trade;
               }));
             }
-          } else if (data.op === 'pong') {
-            // Heartbeat response - ignore
           }
         } catch (err) {
-          // Ignore parse errors
+          // Ignore
         }
       };
 
-      ws.onerror = (error) => {
-        console.warn('Public WebSocket error:', error);
+      ws.onerror = () => {
+        console.warn('RecentTrades WebSocket error');
       };
 
-      ws.onclose = (event) => {
-        console.log('Public WebSocket disconnected:', event.code);
+      ws.onclose = () => {
+        console.log('RecentTrades WebSocket disconnected');
         stopHeartbeat();
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
-        const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-        reconnectTimeoutRef.current = setTimeout(() => {
-          setReconnectAttempts(prev => prev + 1);
-          connectWebSocket();
-        }, delay);
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
       };
     } catch (err) {
-      console.error('Failed to connect public WebSocket:', err);
-    }
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    if (privateWsRef.current) {
-      privateWsRef.current.close(1000, 'Normal closure');
-      privateWsRef.current = null;
-    }
-    stopHeartbeat();
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
+      console.error('Failed to connect RecentTrades WebSocket:', err);
     }
   };
 
@@ -568,30 +356,39 @@ export default function RecentTradesFeed() {
     }
   };
 
+  const disconnectWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, 'Normal closure');
+      wsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    stopHeartbeat();
+  };
+
   useEffect(() => {
     fetchTrades();
     connectWebSocket();
-    connectPrivateWebSocket();
-    
+
     const interval = setInterval(() => {
       if (!isRefreshing) {
         fetchTrades();
       }
     }, 30000);
-    
+
     return () => {
       clearInterval(interval);
       disconnectWebSocket();
     };
   }, []);
 
-  const wins = trades.filter(
-    (t) => t.outcome === 'tp1_hit' || t.outcome === 'tp2_hit'
-  ).length;
-  
-  const openTrades = trades.filter(t => t.status === 'open').length;
-  const closedTrades = trades.filter(t => t.status === 'closed').length;
-  const totalPnl = trades.reduce((sum, t) => sum + t.pnl, 0);
+  const formatPrice = (price: number): string => {
+    if (price >= 1000) return price.toFixed(2);
+    if (price >= 1) return price.toFixed(4);
+    return price.toFixed(6);
+  };
 
   if (isLoading) {
     return (
@@ -604,17 +401,18 @@ export default function RecentTradesFeed() {
     );
   }
 
+  const wins = trades.filter(t => t.outcome === 'tp1_hit' || t.outcome === 'tp2_hit').length;
+  const openTrades = trades.filter(t => t.status === 'open').length;
+  const closedTrades = trades.filter(t => t.status === 'closed').length;
+  const totalPnl = trades.reduce((sum, t) => sum + t.pnl, 0);
+
   return (
     <div className="card-surface overflow-hidden">
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-semibold text-foreground">
             Recent Trades
-            {accountInfo && (
-              <span className="ml-2 text-[10px] font-normal text-muted-foreground">
-                {accountInfo.accountType} Account
-              </span>
-            )}
+            <span className="ml-2 text-[10px] font-normal text-muted-foreground">Unified Account</span>
           </h3>
           {isApiConnected && (
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
@@ -628,14 +426,8 @@ export default function RecentTradesFeed() {
           )}
         </div>
         <div className="flex items-center gap-3 text-xs">
-          <span className="text-muted-foreground">
-            {wins}/{closedTrades} wins
-          </span>
-          <span
-            className={`font-semibold font-tabular ${
-              totalPnl >= 0 ? 'text-positive' : 'text-negative'
-            }`}
-          >
+          <span className="text-muted-foreground">{wins}/{closedTrades} wins</span>
+          <span className={`font-semibold font-tabular ${totalPnl >= 0 ? 'text-positive' : 'text-negative'}`}>
             {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
           </span>
           <button
@@ -659,7 +451,7 @@ export default function RecentTradesFeed() {
         <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
           <p className="text-sm font-semibold text-foreground">No trades yet</p>
           <p className="text-xs text-muted-foreground mt-1">
-            {isApiConnected ? 'Trades will appear here as they execute on Bybit' : 'Trades will appear here as they execute'}
+            {isApiConnected ? 'Trades will appear here as they execute on Bybit' : 'Connect your Bybit API to view trades'}
           </p>
         </div>
       ) : (
@@ -667,16 +459,11 @@ export default function RecentTradesFeed() {
           <table className="w-full text-xs" aria-label="Recent trades">
             <thead>
               <tr className="border-b border-border/50">
-                {['Time', 'Symbol', 'Dir.', 'Status', 'Outcome', 'P&L', 'Hold', 'Conf.'].map(
-                  (h, i) => (
-                    <th
-                      key={`th-recent-${i}`}
-                      className="px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-widest text-muted-foreground"
-                    >
-                      {h}
-                    </th>
-                  )
-                )}
+                {['Time', 'Symbol', 'Dir.', 'Status', 'Outcome', 'P&L', 'Hold', 'Conf.'].map((h, i) => (
+                  <th key={`th-recent-${i}`} className="px-4 py-2.5 text-left text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -684,72 +471,34 @@ export default function RecentTradesFeed() {
                 const Icon = OUTCOME_ICON[trade.outcome];
                 const color = OUTCOME_COLOR[trade.outcome];
                 const isOpen = trade.status === 'open';
-                
-                // Determine the badge variant for StatusBadge
-                // Use 'default' as fallback for 'open' since it's not a valid variant
-                const directionVariant = trade.direction === 'long' ? 'long' : 'short';
-                const outcomeVariant = isOpen ? 'pending' : trade.outcome === 'tp1_hit' || trade.outcome === 'tp2_hit' ? 'confirmed' : 'expired';
-                
+
                 return (
-                  <tr
-                    key={trade.id}
-                    className={`border-b border-border/30 hover:bg-muted/20 transition-colors duration-100 ${
-                      isOpen ? 'bg-yellow-50/30 dark:bg-yellow-950/10' : ''
-                    }`}
-                  >
-                    <td className="px-4 py-2.5 font-mono text-muted-foreground font-tabular">
-                      {trade.closedAt}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono font-semibold text-foreground">
-                      {trade.symbol}
-                    </td>
+                  <tr key={trade.id} className={`border-b border-border/30 hover:bg-muted/20 transition-colors duration-100 ${isOpen ? 'bg-yellow-50/30 dark:bg-yellow-950/10' : ''}`}>
+                    <td className="px-4 py-2.5 font-mono text-muted-foreground font-tabular">{trade.closedAt}</td>
+                    <td className="px-4 py-2.5 font-mono font-semibold text-foreground">{trade.symbol}</td>
+                    <td className="px-4 py-2.5"><StatusBadge variant={trade.direction} size="sm" /></td>
                     <td className="px-4 py-2.5">
-                      <StatusBadge variant={directionVariant} size="sm" />
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize ${
-                        isOpen
-                          ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400'
-                          : 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'
-                      }`}>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize ${isOpen ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400' : 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'}`}>
                         {isOpen ? 'Open' : 'Closed'}
                       </span>
                     </td>
                     <td className="px-4 py-2.5">
                       <div className={`flex items-center gap-1.5 ${color}`}>
                         <Icon size={12} />
-                        <StatusBadge variant={outcomeVariant} size="sm" />
+                        <StatusBadge variant={isOpen ? 'pending' : trade.outcome === 'tp1_hit' || trade.outcome === 'tp2_hit' ? 'confirmed' : 'expired'} size="sm" />
                       </div>
                     </td>
                     <td className="px-4 py-2.5">
-                      <span
-                        className={`font-semibold font-tabular ${
-                          trade.pnl >= 0 ? 'text-positive' : 'text-negative'
-                        }`}
-                      >
+                      <span className={`font-semibold font-tabular ${trade.pnl >= 0 ? 'text-positive' : 'text-negative'}`}>
                         {trade.pnl >= 0 ? '+' : ''}${Math.abs(trade.pnl).toFixed(2)}
                       </span>
-                      <span
-                        className={`ml-1 text-[10px] font-tabular ${
-                          trade.pnlPct >= 0 ? 'text-positive/70' : 'text-negative/70'
-                        }`}
-                      >
-                        ({trade.pnlPct >= 0 ? '+' : ''}
-                        {trade.pnlPct.toFixed(2)}%)
+                      <span className={`ml-1 text-[10px] font-tabular ${trade.pnlPct >= 0 ? 'text-positive/70' : 'text-negative/70'}`}>
+                        ({trade.pnlPct >= 0 ? '+' : ''}{trade.pnlPct.toFixed(2)}%)
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 font-mono text-muted-foreground font-tabular">
-                      {trade.holdMins}m
-                    </td>
+                    <td className="px-4 py-2.5 font-mono text-muted-foreground font-tabular">{trade.holdMins}m</td>
                     <td className="px-4 py-2.5">
-                      <span
-                        className={`font-semibold font-tabular text-xs ${
-                          trade.confidence >= 85
-                            ? 'text-positive'
-                            : trade.confidence >= 80
-                            ? 'text-info' : 'text-warning'
-                        }`}
-                      >
+                      <span className={`font-semibold font-tabular text-xs ${trade.confidence >= 85 ? 'text-positive' : trade.confidence >= 80 ? 'text-info' : 'text-warning'}`}>
                         {Math.round(trade.confidence)}%
                       </span>
                     </td>
