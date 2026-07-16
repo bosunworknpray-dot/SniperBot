@@ -55,6 +55,12 @@ const SUPPORTED_SYMBOLS = [
   'MATICUSDT', 'LTCUSDT', 'NEARUSDT', 'APTUSDT', 'ARBUSDT',
 ];
 
+// Minimum time between WebSocket-triggered rescans. Ticker ticks can arrive
+// many times per second across 15 symbols; without a throttle every tick
+// would kick off a full market scan (15 ticker fetches + up to 15 kline
+// fetches), flooding Bybit's REST API and causing "Failed to fetch" errors.
+const MIN_RESCAN_INTERVAL_MS = 20000;
+
 // ============== API HELPERS ==============
 const getApiCredentials = () => getBybitCredentials();
 
@@ -178,6 +184,12 @@ export default function SignalEnginePage() {
   const autoExecutionRef = useRef<Set<string>>(new Set());
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // Tracks the last time a market scan actually ran, so rapid-fire WS ticks
+  // can't each trigger their own full rescan.
+  const lastScanRef = useRef<number>(0);
+  // Guards against overlapping scans (a scan already in flight when another
+  // is requested).
+  const isScanningRef = useRef<boolean>(false);
 
   // Calculate technical indicators from kline data
   const calculateIndicators = (klines: any[]): { rsi: number; macd: { signal: 'bullish' | 'bearish' | 'neutral' }; bb: { position: string } } => {
@@ -295,8 +307,17 @@ export default function SignalEnginePage() {
     };
   };
 
-  // Fetch market data and generate signals
+  // Fetch market data and generate signals.
+  // NOTE: this intentionally has no dependency on `signals` state — it reads
+  // the latest signals via the functional form of setSignals instead. That
+  // keeps this callback's identity stable across renders, which in turn
+  // keeps the WebSocket connection (which depends on this function) from
+  // being torn down and reconnected on every signal update.
   const fetchMarketDataAndGenerateSignals = useCallback(async () => {
+    if (isScanningRef.current) return; // don't overlap scans
+    isScanningRef.current = true;
+    lastScanRef.current = Date.now();
+
     try {
       setIsLoading(true);
       setError(null);
@@ -304,27 +325,36 @@ export default function SignalEnginePage() {
       const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
       setMarketData(tickers);
 
-      const newSignals: Signal[] = [];
+      // Fetch klines / build signals in parallel instead of a sequential
+      // for-await loop — sequential awaits inside the loop meant each
+      // symbol's kline request waited on the previous one, and any backlog
+      // from overlapping scans would compound into a large request queue
+      // that Bybit (or the browser) would start rejecting as network errors.
+      const signalResults = await Promise.all(
+        Object.entries(tickers).map(([symbol, ticker]) =>
+          generateSignalFromData(symbol, ticker).catch((err) => {
+            console.error(`Error generating signal for ${symbol}:`, err);
+            return null;
+          })
+        )
+      );
+      const newSignals = signalResults.filter((s): s is Signal => s !== null);
 
-      for (const [symbol, ticker] of Object.entries(tickers)) {
-        const signal = await generateSignalFromData(symbol, ticker);
-        if (signal) {
-          newSignals.push(signal);
-        }
-      }
+      setSignals(prevSignals => {
+        // Keep existing live/pending signals, add new ones
+        const existingActive = prevSignals.filter(s => s.status === 'live' || s.status === 'pending');
 
-      // Keep existing live/pending signals, add new ones
-      const existingActive = signals.filter(s => s.status === 'live' || s.status === 'pending');
-      
-      // Combine and deduplicate by symbol
-      const combined = [...newSignals, ...existingActive];
-      const uniqueSignals = Array.from(
-        new Map(combined.map(s => [s.symbol, s])).values()
-      ).sort((a, b) => b.confidence - a.confidence);
+        // Combine and deduplicate by symbol
+        const combined = [...newSignals, ...existingActive];
+        const uniqueSignals = Array.from(
+          new Map(combined.map(s => [s.symbol, s])).values()
+        ).sort((a, b) => b.confidence - a.confidence);
 
-      const merged = uniqueSignals.slice(0, 50);
-      setSignals(merged);
-      setSharedSignals(merged as any);
+        const merged = uniqueSignals.slice(0, 50);
+        setSharedSignals(merged as any);
+        return merged;
+      });
+
       setLastUpdate(new Date());
 
     } catch (err: any) {
@@ -332,8 +362,9 @@ export default function SignalEnginePage() {
       setError(err.message || 'Failed to fetch market data');
     } finally {
       setIsLoading(false);
+      isScanningRef.current = false;
     }
-  }, [signals]);
+  }, []);
 
   // Connect WebSocket
   const connectWebSocket = useCallback(() => {
@@ -367,8 +398,14 @@ export default function SignalEnginePage() {
             const ticker = data.data;
             if (ticker && ticker.symbol) {
               setMarketData(prev => ({ ...prev, [ticker.symbol]: ticker }));
-              // Refresh signals on price update
-              fetchMarketDataAndGenerateSignals();
+
+              // Throttle: only trigger a full rescan if enough time has
+              // passed since the last one. Ticker ticks can arrive far more
+              // often than that across 15 subscribed symbols.
+              const now = Date.now();
+              if (now - lastScanRef.current >= MIN_RESCAN_INTERVAL_MS) {
+                fetchMarketDataAndGenerateSignals();
+              }
             }
           }
         } catch (err) {
@@ -411,7 +448,11 @@ export default function SignalEnginePage() {
     }
   }, []);
 
-  // Initialize
+  // Initialize — runs once on mount. connectionStatus is intentionally
+  // excluded from the dependency array: including it previously caused the
+  // WebSocket to be torn down and reconnected (and a fresh rescan interval
+  // spun up) on every connection status change, which combined with the
+  // per-tick rescans on message was a major contributor to request flooding.
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const storedValue = window.localStorage.getItem('auto_trading_enabled');
@@ -433,10 +474,10 @@ export default function SignalEnginePage() {
     connectWebSocket();
 
     const interval = setInterval(() => {
-      if (connectionStatus === 'disconnected') {
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
         fetchMarketDataAndGenerateSignals();
       }
-    }, 120000); // Rescan every 2 minutes
+    }, 120000); // Rescan every 2 minutes if the socket isn't delivering ticks
 
     return () => {
       clearInterval(interval);
@@ -447,7 +488,8 @@ export default function SignalEnginePage() {
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchMarketDataAndGenerateSignals, connectWebSocket, disconnectWebSocket, connectionStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Update statistics
   useEffect(() => {
@@ -474,6 +516,7 @@ export default function SignalEnginePage() {
       autoExecutionRef.current.add(signal.id);
       void handleExecuteSignal(signal, 'live');
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signals, autoTradingEnabled]);
 
   const handleRescan = async () => {
@@ -483,7 +526,7 @@ export default function SignalEnginePage() {
     try {
       await fetchMarketDataAndGenerateSignals();
       
-      if (connectionStatus === 'disconnected') {
+      if (connectionStatus === 'disconnected' || connectionStatus === 'error') {
         disconnectWebSocket();
         setTimeout(connectWebSocket, 1000);
       }

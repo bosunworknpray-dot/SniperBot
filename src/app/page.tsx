@@ -567,17 +567,6 @@ export default function Home() {
       const { totalEquity, availableBalance } = await fetchWalletBalance();
       setActualBalance(totalEquity);
       setSharedBalance({ totalEquity, availableBalance, baseEquity });
-      setSharedMetrics({
-        totalPnl: Math.round(totalPnl * 100) / 100,
-        totalPnlPct: Math.round(totalReturn * 100) / 100,
-        dailyPnl: Math.round(dailyPnl * 100) / 100,
-        dailyPnlPct: Math.round((dailyPnl / totalEquity) * 100 * 100) / 100,
-        openPositions,
-        totalTrades: Math.max(totalTrades, 0),
-        winRate: Math.round(winRate * 10) / 10,
-        maxDrawdown: -Math.min(15, Math.random() * 10 + 2),
-        riskExposure: Math.min(20, openPositions * 3 + 2),
-      });
       setIsApiConnected(true);
 
       // Fetch positions
@@ -631,7 +620,7 @@ export default function Home() {
         totalPnl: Math.round(totalPnl * 100) / 100,
         totalPnlPct: Math.round(totalReturn * 100) / 100,
         dailyPnl: Math.round(dailyPnl * 100) / 100,
-        dailyPnlPct: Math.round((dailyPnl / totalEquity) * 100 * 100) / 100,
+        dailyPnlPct: totalEquity > 0 ? Math.round((dailyPnl / totalEquity) * 100 * 100) / 100 : 0,
         openPositions,
         totalTrades: Math.max(totalTrades, 0),
         winRate: Math.round(winRate * 10) / 10,
@@ -691,9 +680,11 @@ export default function Home() {
         }
       });
 
-      const mergedSignals = [...newSignals, ...signals].slice(0, 50);
-      setSignals(mergedSignals);
-      setSharedSignals(mergedSignals as any);
+      setSignals(prevSignals => {
+        const mergedSignals = [...newSignals, ...prevSignals].slice(0, 50);
+        setSharedSignals(mergedSignals as any);
+        return mergedSignals;
+      });
       setLastUpdate(new Date());
       
     } catch (err: any) {
@@ -921,7 +912,8 @@ export default function Home() {
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchAllData, connectWebSocket, disconnectWebSocket, connectionStatus, refreshPnlSnapshot]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Update bot uptime
   useEffect(() => {
