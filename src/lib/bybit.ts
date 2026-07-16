@@ -127,6 +127,8 @@ export async function placeBybitOrder(options: {
   positionIdx?: number;
   apiKey?: string;
   apiSecret?: string;
+  stopLoss?: number;
+  takeProfit?: number;
 }) {
   const { symbol, side, qty, leverage = 5, positionIdx, apiKey, apiSecret } = options;
   const credentials = apiKey && apiSecret
@@ -165,6 +167,15 @@ export async function placeBybitOrder(options: {
     timeInForce: 'GTC',
     ...(typeof positionIdx === 'number' ? { positionIdx } : {}),
   };
+  // Include TP/SL when provided
+  if (typeof (options.stopLoss) === 'number' && !isNaN(options.stopLoss)) {
+    orderBody.stopLoss = options.stopLoss.toString();
+    orderBody.tpSlMode = 'Full';
+  }
+  if (typeof (options.takeProfit) === 'number' && !isNaN(options.takeProfit)) {
+    orderBody.takeProfit = options.takeProfit.toString();
+    orderBody.tpSlMode = 'Full';
+  }
   const orderHeaders = await createBybitAuthHeaders(credentials.apiKey, credentials.apiSecret, orderBody, recvWindow);
   const orderResponse = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
     method: 'POST',

@@ -577,8 +577,31 @@ export default function SignalEnginePage() {
         throw new Error('Live trading credentials are not configured. Add them in Settings first.');
       }
 
-      const size = 0.001;
+      // Calculate conservative live order size based on available balance and risk
+      const stateResp = await fetch('/api/bybit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: '/v5/account/wallet-balance', method: 'GET' }),
+      });
+      const wallet = await stateResp.json();
+      const available = parseFloat(wallet?.result?.list?.[0]?.availableBalance || wallet?.result?.list?.[0]?.walletBalance || '0') || 0;
+      const maxRiskPct = parseFloat(process.env.NEXT_PUBLIC_AUTO_EXECUTE_MAX_RISK_PCT || '2');
+      const accountRisk = available * (maxRiskPct / 100);
+      const priceDiff = Math.abs(signal.entryPrice - signal.sl);
+      let size = priceDiff > 0 ? accountRisk / priceDiff : 0;
+      const MIN_SIZE = 0.0001;
+      if (size < MIN_SIZE) {
+        throw new Error('Calculated order size too small for live execution');
+      }
+
+      // Ensure margin requirement fits available balance (use leverage 5)
       const leverage = 5;
+      const requiredMargin = (size * signal.entryPrice) / leverage;
+      if (requiredMargin > available) {
+        size = (available * 0.8 * leverage) / signal.entryPrice;
+        if (size < MIN_SIZE) throw new Error('Insufficient funds to place order');
+      }
+
       const orderResult = await placeBybitOrder({
         symbol: signal.symbol,
         side: signal.direction,
@@ -586,6 +609,8 @@ export default function SignalEnginePage() {
         leverage,
         apiKey,
         apiSecret,
+        stopLoss: signal.sl,
+        takeProfit: signal.tp1,
       });
 
       if (!orderResult.success) {

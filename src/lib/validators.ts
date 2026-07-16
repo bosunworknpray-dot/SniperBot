@@ -10,21 +10,26 @@ export const BybitWalletResponseSchema = z.object({
   result: z.object({
     list: z.array(
       z.object({
-        totalEquity: z.string(),
-        accountIMRate: z.string(),
-        totalMarginBalance: z.string(),
-        totalInitialMargin: z.string(),
-        accountType: z.string(),
-        totalAvailableBalance: z.string(),
+        totalEquity: z.union([z.string(), z.number()]).optional(),
+        accountIMRate: z.union([z.string(), z.number()]).optional(),
+        totalMarginBalance: z.union([z.string(), z.number()]).optional(),
+        totalInitialMargin: z.union([z.string(), z.number()]).optional(),
+        accountType: z.string().optional(),
+        totalAvailableBalance: z.union([z.string(), z.number()]).optional(),
+        availableBalance: z.union([z.string(), z.number()]).optional(),
+        walletBalance: z.union([z.string(), z.number()]).optional(),
+        equity: z.union([z.string(), z.number()]).optional(),
+        // coin array can vary by API version; accept either 'coin' or 'coins' and allow flexible shapes
         coin: z.array(
           z.object({
-            coin: z.string(),
-            equity: z.string(),
-            walletBalance: z.string(),
-            free: z.string(),
-            locked: z.string(),
+            coin: z.string().optional(),
+            equity: z.union([z.string(), z.number()]).optional(),
+            walletBalance: z.union([z.string(), z.number()]).optional(),
+            free: z.union([z.string(), z.number()]).optional(),
+            locked: z.union([z.string(), z.number()]).optional(),
           })
-        ),
+        ).optional(),
+        coins: z.array(z.any()).optional(),
       })
     ),
   }),

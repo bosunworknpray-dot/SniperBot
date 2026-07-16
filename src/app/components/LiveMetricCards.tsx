@@ -1,9 +1,10 @@
 // app/components/LiveMetricCards.tsx
 
-'use client';
+"use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
+import { getSharedTradingState, subscribeToSharedTradingState } from '@/lib/tradingState';
 import {
   TrendingUp,
   TrendingDown,
@@ -101,10 +102,22 @@ function MetricCard({
 export default function LiveMetricCards() {
   const { data: realtimeData, loading: isLoading, error } = useSharedRealtimeData();
   const [showBalance, setShowBalance] = useState(true);
+  const [sharedState, setSharedState] = useState(getSharedTradingState());
+
+  useEffect(() => {
+    const unsub = subscribeToSharedTradingState((s) => setSharedState(s));
+    return unsub;
+  }, []);
 
   // Calculate metrics from real-time data
-  const balance = realtimeData?.balance?.totalEquity || 100;
-  const availableBalance = realtimeData?.balance?.availableBalance || 100;
+  // Respect bot mode: use paper balance when in paper mode
+  const isPaperMode = sharedState.bot?.mode === 'paper';
+  const balance = isPaperMode
+    ? sharedState.balance?.totalEquity ?? realtimeData?.balance?.totalEquity ?? 100
+    : realtimeData?.balance?.totalEquity ?? sharedState.balance?.totalEquity ?? 100;
+  const availableBalance = isPaperMode
+    ? sharedState.balance?.availableBalance ?? realtimeData?.balance?.availableBalance ?? 100
+    : realtimeData?.balance?.availableBalance ?? sharedState.balance?.availableBalance ?? 100;
   
   // Calculate position stats
   const positionCount = realtimeData?.positions?.filter(pos => parseFloat(pos.size) !== 0).length || 0;

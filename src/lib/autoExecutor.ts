@@ -153,18 +153,33 @@ class AutoExecutor {
         riskReward: signal.rr,
       });
 
-      // Calculate position size (1-2% risk per trade)
+      // Calculate position size (risk-based sizing)
       const state = getSharedTradingState();
       const accountRisk = state.balance.totalEquity * (this.config.maxRiskPct / 100);
       const priceDiff = Math.abs(signal.entryPrice - signal.sl);
-      const qty = priceDiff > 0 ? Math.floor(accountRisk / priceDiff) : 0;
+      let qty = priceDiff > 0 ? accountRisk / priceDiff : 0; // qty in base asset
 
-      if (qty < 0.001) {
-        logger.warn('AutoExecutor', 'Position size too small', {
-          signalId: signal.id,
-          qty,
-        });
+      // Minimum practical qty to avoid tiny orders
+      const MIN_QTY = 0.0001;
+      if (qty < MIN_QTY) {
+        logger.warn('AutoExecutor', 'Position size too small', { signalId: signal.id, qty });
         return;
+      }
+
+      // Ensure sufficient available balance for initial margin
+      const leverage = 5; // same as used when placing order
+      const notional = qty * signal.entryPrice; // USD exposure
+      const requiredMargin = notional / leverage;
+      const available = state.balance.availableBalance || state.balance.totalEquity;
+
+      if (requiredMargin > available) {
+        // Adjust qty down to available balance (use 80% buffer)
+        const adjustedQty = (available * 0.8 * leverage) / signal.entryPrice;
+        if (adjustedQty < MIN_QTY) {
+          logger.warn('AutoExecutor', 'Not enough available balance to open position', { signalId: signal.id, requiredMargin, available });
+          return;
+        }
+        qty = adjustedQty;
       }
 
       // Execute order

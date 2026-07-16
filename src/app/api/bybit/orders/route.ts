@@ -106,6 +106,26 @@ async function validateRiskLimits(
   }
 }
 
+async function fetchInstrumentInfo(symbol: string) {
+  try {
+    const url = `${BYBIT_BASE_URL}/v5/market/instruments-info?category=linear&symbol=${encodeURIComponent(symbol)}`;
+    const resp = await requestManager.executeWithRateLimit(url, { method: 'GET' });
+    if (resp?.retCode !== 0) return null;
+    const info = resp.result?.list?.[0];
+    if (!info) return null;
+
+    // Try multiple possible filter shapes
+    const lot = info.lotSizeFilter || info.lot_size_filter || info.sizeFilter || info.size_filter || {};
+    const minOrderQty = parseFloat(lot.minOrderQty || lot.min_qty || lot.min || '0') || 0;
+    const qtyStep = parseFloat(lot.qtyStep || lot.stepSize || lot.qty_step || lot.step || '0') || 0;
+
+    return { minOrderQty, qtyStep };
+  } catch (error) {
+    logger.warn('AutoExecute', 'Failed to fetch instrument info', { symbol, error });
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body: ExecuteOrderRequest = await req.json();
@@ -147,8 +167,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Validate risk limits
-    const riskCheck = await validateRiskLimits(symbol, parseFloat(qty), side, orderType);
+    // Ensure quantity meets exchange minimums/step for the symbol
+    const instrument = await fetchInstrumentInfo(symbol);
+    let numericQty = parseFloat(qty as any);
+    if (instrument && !isNaN(numericQty)) {
+      const { minOrderQty, qtyStep } = instrument;
+      if (minOrderQty && numericQty < minOrderQty) {
+        // Round up to minimum or step
+        if (qtyStep && qtyStep > 0) {
+          numericQty = Math.ceil(minOrderQty / qtyStep) * qtyStep;
+        } else {
+          numericQty = minOrderQty;
+        }
+        logger.info('AutoExecute', 'Adjusted order qty to meet exchange minimums', { symbol, adjustedQty: numericQty });
+      }
+    }
+
+    // Validate risk limits with possibly adjusted qty
+    const riskCheck = await validateRiskLimits(symbol, numericQty, side, orderType);
     if (!riskCheck.allowed) {
       logger.warn('AutoExecute', `Risk check failed: ${riskCheck.reason}`, { symbol, qty });
       return NextResponse.json(
@@ -163,7 +199,7 @@ export async function POST(req: NextRequest) {
       symbol,
       side,
       orderType,
-      qty,
+      qty: numericQty.toString(),
       timeInForce,
       positionIdx,
       leverage: leverage.toString(),
@@ -202,18 +238,19 @@ export async function POST(req: NextRequest) {
       }
     );
 
-    // Validate response
+    logger.debug('AutoExecute', 'Raw order response from Bybit', { response });
+
+    // If Bybit returned an error code, forward it to the caller for visibility
+    if (response?.retCode !== undefined && response.retCode !== 0) {
+      logger.warn('AutoExecute', 'Bybit rejected order', { retCode: response.retCode, retMsg: response.retMsg, symbol });
+      return NextResponse.json(response, { status: 400 });
+    }
+
+    // Validate response schema
     const validation = parseOrderResponse(response);
     if (!validation.success) {
-      logger.error('AutoExecute', 'Invalid order response format', {
-        symbol,
-        signalId,
-        errors: validation.error,
-      });
-      return NextResponse.json(
-        { error: 'Invalid response from Bybit' },
-        { status: 500 }
-      );
+      logger.error('AutoExecute', 'Invalid order response format', { symbol, signalId, errors: validation.error });
+      return NextResponse.json({ error: 'Invalid response from Bybit', details: validation.error }, { status: 500 });
     }
 
     logger.info('AutoExecute', 'Order executed successfully', {

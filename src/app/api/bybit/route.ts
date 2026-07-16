@@ -28,7 +28,6 @@ async function createBybitSignature(
 ): Promise<string> {
   const originString = `${timestamp}${API_KEY}${recvWindow}${payload}`;
   const encoder = new TextEncoder();
-
   const key = await crypto.subtle.importKey(
     'raw',
     encoder.encode(API_SECRET),
@@ -87,12 +86,30 @@ export async function POST(req: NextRequest) {
       let url = `${BYBIT_BASE_URL}${endpoint}`;
       let signature_payload = '';
       let requestBody = body;
-      
-      // For position/list endpoint, add settleCoin parameter
+      let queryParams = '';
+
+      // For position/list endpoint, ensure category and settleCoin are provided and included in signature
       if (endpoint.includes('position/list')) {
-        url += '?settleCoin=USDT';
-        // signature_payload stays empty for GET requests
-        signature_payload = '';
+        queryParams = 'category=linear&settleCoin=USDT';
+        url += (endpoint.includes('?') ? '&' : '?') + queryParams;
+        signature_payload = queryParams;
+
+      // For wallet-balance, Bybit requires accountType (e.g. UNIFIED)
+      } else if (endpoint.includes('wallet-balance')) {
+        queryParams = 'accountType=UNIFIED';
+        url += (endpoint.includes('?') ? '&' : '?') + queryParams;
+        signature_payload = queryParams;
+
+      // For order realtime/history GET endpoints, ensure category is provided
+      } else if (endpoint.includes('/v5/order') && method === 'GET') {
+        // For order endpoints queried via GET, include category and settleCoin when appropriate
+        queryParams = 'category=linear';
+        if (endpoint.includes('realtime')) {
+          queryParams += '&settleCoin=USDT';
+        }
+        url += (endpoint.includes('?') ? '&' : '?') + queryParams;
+        signature_payload = queryParams;
+
       } else if (method === 'POST') {
         requestBody = body || {};
         signature_payload = JSON.stringify(requestBody);
