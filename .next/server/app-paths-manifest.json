@@ -1,0 +1,7 @@
+{
+  "/performance-analytics/page": "app/performance-analytics/page.js",
+  "/page": "app/page.js",
+  "/trade-logs/page": "app/trade-logs/page.js",
+  "/signal-engine/page": "app/signal-engine/page.js",
+  "/settings/page": "app/settings/page.js"
+}
