@@ -5,7 +5,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { appendSharedAlert, getSharedTradingState, setSharedBalance, setSharedBotState, setSharedMetrics, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
   Zap, Wifi, WifiOff, RefreshCw, AlertCircle,
@@ -107,6 +108,7 @@ interface BotStatus {
   lastAction: string;
   lastActionTime: string;
   uptime: string;
+  autoTradingEnabled: boolean;
 }
 
 // ============== BYBIT API CONFIG ==============
@@ -122,26 +124,11 @@ const getApiCredentials = () => getBybitCredentials();
 // Fetch wallet balance
 const fetchWalletBalance = async (): Promise<{ totalEquity: number; availableBalance: number }> => {
   try {
-    const { apiKey, apiSecret } = getApiCredentials();
-    if (!apiKey || !apiSecret) {
-      return { totalEquity: 100, availableBalance: 100 };
-    }
-
-    const recvWindow = '5000';
-    const params = '';
-    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
-
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
-      method: 'GET',
-      headers,
-    });
-
-    const data = await safeJsonParse(response);
-    if (data?.retCode === 0 && data?.result?.list?.[0]) {
-      const wallet = data.result.list[0];
+    const balance = await fetchBybitWalletBalance();
+    if (balance.totalEquity > 0 || balance.availableBalance > 0) {
       return {
-        totalEquity: parseFloat(wallet.totalEquity || '100'),
-        availableBalance: parseFloat(wallet.availableBalance || '100'),
+        totalEquity: balance.totalEquity || 100,
+        availableBalance: balance.availableBalance || 100,
       };
     }
     return { totalEquity: 100, availableBalance: 100 };
@@ -433,6 +420,7 @@ export default function Home() {
     lastAction: 'Waiting...',
     lastActionTime: '',
     uptime: '0h 0m',
+    autoTradingEnabled: true,
   });
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('connecting');
   const [isLoading, setIsLoading] = useState(true);
@@ -450,6 +438,19 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSharedTradingState((state) => {
+      setMetrics(prev => ({ ...prev, ...state.metrics }));
+      setSignals(state.signals);
+      setAlerts(state.alerts);
+      setBotStatus(prev => ({ ...prev, ...state.bot }));
+      setActualBalance(state.balance.totalEquity);
+      setBaseEquity(state.balance.baseEquity);
+      setPaperEquity(state.balance.totalEquity);
+    });
+    return unsubscribe;
+  }, []);
 
   // Check API credentials
   const hasValidCredentials = useCallback(() => {
@@ -477,6 +478,18 @@ export default function Home() {
       // Fetch wallet balance
       const { totalEquity, availableBalance } = await fetchWalletBalance();
       setActualBalance(totalEquity);
+      setSharedBalance({ totalEquity, availableBalance, baseEquity });
+      setSharedMetrics({
+        totalPnl: Math.round(totalPnl * 100) / 100,
+        totalPnlPct: Math.round(totalReturn * 100) / 100,
+        dailyPnl: Math.round(dailyPnl * 100) / 100,
+        dailyPnlPct: Math.round((dailyPnl / totalEquity) * 100 * 100) / 100,
+        openPositions,
+        totalTrades: Math.max(totalTrades, 0),
+        winRate: Math.round(winRate * 10) / 10,
+        maxDrawdown: -Math.min(15, Math.random() * 10 + 2),
+        riskExposure: Math.min(20, openPositions * 3 + 2),
+      });
       setIsApiConnected(true);
 
       // Fetch positions
@@ -513,8 +526,7 @@ export default function Home() {
 
       const winRate = (wins + losses) > 0 ? (wins / (wins + losses)) * 100 : 0;
       const totalReturn = baseEquity > 0 ? ((totalEquity - baseEquity) / baseEquity) * 100 : 0;
-
-      setMetrics({
+      const nextMetrics = {
         totalBalance: totalEquity,
         availableBalance: availableBalance,
         equity: totalEquity,
@@ -527,6 +539,19 @@ export default function Home() {
         winRate: Math.round(winRate * 10) / 10,
         maxDrawdown: -Math.min(15, Math.random() * 10 + 2),
         riskExposure: Math.min(20, openPositions * 3 + 2),
+      };
+
+      setMetrics(nextMetrics);
+      setSharedMetrics({
+        totalPnl: nextMetrics.totalPnl,
+        totalPnlPct: nextMetrics.totalPnlPct,
+        dailyPnl: nextMetrics.dailyPnl,
+        dailyPnlPct: nextMetrics.dailyPnlPct,
+        openPositions: nextMetrics.openPositions,
+        totalTrades: nextMetrics.totalTrades,
+        winRate: nextMetrics.winRate,
+        maxDrawdown: nextMetrics.maxDrawdown,
+        riskExposure: nextMetrics.riskExposure,
       });
 
       // Update equity data
@@ -568,7 +593,9 @@ export default function Home() {
         }
       });
 
-      setSignals(prev => [...newSignals, ...prev].slice(0, 50));
+      const mergedSignals = [...newSignals, ...signals].slice(0, 50);
+      setSignals(mergedSignals);
+      setSharedSignals(mergedSignals as any);
       setLastUpdate(new Date());
       
     } catch (err: any) {
@@ -707,30 +734,33 @@ export default function Home() {
       price,
     };
     setAlerts(prev => [newAlert, ...prev].slice(0, 50));
+    appendSharedAlert(newAlert);
   };
 
   // Bot controls
   const handleStartBot = () => {
-    setBotStatus(prev => ({
-      ...prev,
+    const nextBotState = {
       isRunning: true,
-      status: 'trading',
+      status: 'trading' as const,
       lastAction: 'Bot started',
       lastActionTime: new Date().toLocaleTimeString(),
-    }));
+    };
+    setBotStatus(prev => ({ ...prev, ...nextBotState }));
+    setSharedBotState(nextBotState);
     setBotStartTime(Date.now());
     addAlert('system', 'medium', '🤖 Bot Started', 'Trading bot has been activated');
   };
 
   const handleStopBot = () => {
-    setBotStatus(prev => ({
-      ...prev,
+    const nextBotState = {
       isRunning: false,
-      status: 'idle',
+      status: 'idle' as const,
       lastAction: 'Bot stopped',
       lastActionTime: new Date().toLocaleTimeString(),
       uptime: '0h 0m',
-    }));
+    };
+    setBotStatus(prev => ({ ...prev, ...nextBotState }));
+    setSharedBotState(nextBotState);
     setBotStartTime(null);
     addAlert('system', 'medium', '🛑 Bot Stopped', 'Trading bot has been deactivated');
   };
@@ -740,17 +770,41 @@ export default function Home() {
     if (newMode === 'live' && !window.confirm('⚠️ WARNING: Switching to LIVE mode will use real funds. Are you sure?')) {
       return;
     }
-    setBotStatus(prev => ({
-      ...prev,
+    const nextBotState = {
       mode: newMode,
       lastAction: `Switched to ${newMode} mode`,
       lastActionTime: new Date().toLocaleTimeString(),
-    }));
+    };
+    setBotStatus(prev => ({ ...prev, ...nextBotState }));
+    setSharedBotState(nextBotState);
     fetchAllData();
+  };
+
+  const handleToggleAutoTrading = () => {
+    const nextValue = !botStatus.autoTradingEnabled;
+    const nextBotState = {
+      autoTradingEnabled: nextValue,
+      lastAction: nextValue ? 'Auto-trading enabled' : 'Auto-trading paused',
+      lastActionTime: new Date().toLocaleTimeString(),
+    };
+    setBotStatus(prev => ({ ...prev, ...nextBotState }));
+    setSharedBotState(nextBotState);
+
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('auto_trading_enabled', String(nextValue));
+      window.dispatchEvent(new CustomEvent('auto-trading-settings-changed', { detail: { enabled: nextValue } }));
+    }
   };
 
   // Initialize
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedSetting = window.localStorage.getItem('auto_trading_enabled');
+      if (savedSetting !== null) {
+        setBotStatus(prev => ({ ...prev, autoTradingEnabled: savedSetting === 'true' }));
+      }
+    }
+
     fetchAllData();
     connectWebSocket();
 
@@ -768,7 +822,7 @@ export default function Home() {
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchAllData, connectWebSocket, disconnectWebSocket]);
+  }, [fetchAllData, connectWebSocket, disconnectWebSocket, connectionStatus]);
 
   // Update bot uptime
   useEffect(() => {
@@ -848,6 +902,9 @@ export default function Home() {
                 <div className={`w-1.5 h-1.5 rounded-full ${botStatus.isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
                 {botStatus.isRunning ? 'Active' : 'Stopped'}
               </div>
+              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${botStatus.mode === 'live' && botStatus.autoTradingEnabled ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700'}`}>
+                {botStatus.mode === 'live' && botStatus.autoTradingEnabled ? '⚡ Live Trades ON' : '⏸ Live Trades PAUSED'}
+              </span>
               {isApiConnected && (
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
                   ● API Connected
@@ -1092,6 +1149,20 @@ export default function Home() {
                     }`}
                   >
                     {botStatus.mode.toUpperCase()}
+                  </button>
+                </div>
+                <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Auto-trading</span>
+                  <button
+                    onClick={handleToggleAutoTrading}
+                    className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                      botStatus.autoTradingEnabled
+                        ? 'border-green-300 bg-green-100 text-green-700 dark:border-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : 'border-gray-300 bg-gray-100 text-gray-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400'
+                    }`}
+                  >
+                    <span className={`mr-2 h-2 w-2 rounded-full ${botStatus.autoTradingEnabled ? 'bg-green-500' : 'bg-gray-400'}`} />
+                    {botStatus.autoTradingEnabled ? 'Enabled' : 'Disabled'}
                   </button>
                 </div>
                 <div className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg">

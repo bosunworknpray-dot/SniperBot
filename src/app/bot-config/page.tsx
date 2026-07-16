@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { setSharedBotState } from '@/lib/tradingState';
 import { 
   Settings, ExternalLink, Save, Key, Shield, 
   Wifi, WifiOff, RefreshCw, CheckCircle, XCircle,
@@ -171,6 +172,7 @@ export default function SettingsPage() {
       }));
       
       // Dispatch event to notify other components
+      setSharedBotState({ isConnected: true, status: 'scanning', lastAction: 'Credentials saved' });
       window.dispatchEvent(new CustomEvent('bybit-credentials-saved', {
         detail: {
           apiKey: credentials.apiKey,

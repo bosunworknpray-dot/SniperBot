@@ -4,7 +4,8 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
+import { setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   Activity, Search, Download, ChevronUp, ChevronDown,
   Wifi, WifiOff, RefreshCw, AlertCircle, X, Filter,
@@ -265,52 +266,8 @@ const executeTradeOnBybit = async (
       return { success: false, error: 'API credentials not configured' };
     }
 
-    const recvWindow = '5000';
-
-    const leverageHeaders = await createBybitAuthHeaders(apiKey, apiSecret, `category=linear&symbol=${symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`, recvWindow);
-    
-    await fetch(`${BYBIT_BASE_URL}/v5/position/set-leverage`, {
-      method: 'POST',
-      headers: {
-        ...leverageHeaders,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        category: 'linear',
-        symbol,
-        buyLeverage: leverage.toString(),
-        sellLeverage: leverage.toString(),
-      }),
-    });
-
-    // Place order
-    const orderSide = side === 'LONG' ? 'Buy' : 'Sell';
-    const orderParams = `category=linear&symbol=${symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC`;
-    const orderHeaders = await createBybitAuthHeaders(apiKey, apiSecret, orderParams, recvWindow);
-    
-    const orderResponse = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
-      method: 'POST',
-      headers: {
-        ...orderHeaders,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        category: 'linear',
-        symbol,
-        side: orderSide,
-        orderType: 'Market',
-        qty: size.toString(),
-        timeInForce: 'GTC',
-      }),
-    });
-
-    const data = await safeJsonParse(orderResponse);
-    
-    if (data?.retCode === 0) {
-      return { success: true, orderId: data.result?.orderId };
-    } else {
-      return { success: false, error: data?.retMsg || 'Unknown error' };
-    }
+    const orderResult = await placeBybitOrder({ symbol, side, qty: size, leverage, apiKey, apiSecret });
+    return orderResult;
   } catch (error: any) {
     return { success: false, error: error.message || 'Failed to execute trade' };
   }
@@ -324,35 +281,21 @@ const closePositionOnBybit = async (symbol: string, positionIdx: number, size: n
       return { success: false, error: 'API credentials not configured' };
     }
 
-    const recvWindow = '5000';
-    const orderSide = side === 'LONG' ? 'Sell' : 'Buy';
-    const params = `category=linear&symbol=${symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC&positionIdx=${positionIdx}`;
-    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
-    
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        category: 'linear',
-        symbol,
-        side: orderSide,
-        orderType: 'Market',
-        qty: size.toString(),
-        timeInForce: 'GTC',
-        positionIdx: positionIdx,
-      }),
+    const closeSide = side === 'LONG' ? 'SHORT' : 'LONG';
+    const orderResult = await placeBybitOrder({
+      symbol,
+      side: closeSide,
+      qty: size,
+      leverage: 5,
+      positionIdx,
+      apiKey,
+      apiSecret,
     });
 
-    const data = await safeJsonParse(response);
-    
-    if (data?.retCode === 0) {
-      return { success: true };
-    } else {
-      return { success: false, error: data?.retMsg || 'Unknown error' };
-    }
+    return {
+      success: orderResult.success,
+      error: orderResult.error,
+    };
   } catch (error: any) {
     return { success: false, error: error.message || 'Failed to close position' };
   }
@@ -371,6 +314,14 @@ export default function TradeLogsPage() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('connecting');
   const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSharedTradingState((state) => {
+      const merged = [...state.trades.paper, ...state.trades.live];
+      setTrades(merged as any);
+    });
+    return unsubscribe;
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
@@ -463,6 +414,8 @@ export default function TradeLogsPage() {
       const mergedTrades = [...paperEntries, ...liveEntries, ...tradeData];
       setPositions(positionData);
       setTrades(mergedTrades);
+      setSharedTrades('paper', paperTrades as any);
+      setSharedTrades('live', liveTrades as any);
       setIsApiConnected(true);
       setLastUpdate(new Date());
 
@@ -591,6 +544,12 @@ export default function TradeLogsPage() {
     fetchTradeData();
     connectWebSocket();
 
+    const handleTradeUpdate = () => {
+      fetchTradeData();
+    };
+
+    window.addEventListener('bybit-trades-updated', handleTradeUpdate);
+
     const interval = setInterval(() => {
       if (connectionStatus === 'disconnected') {
         fetchTradeData();
@@ -600,12 +559,13 @@ export default function TradeLogsPage() {
     return () => {
       clearInterval(interval);
       disconnectWebSocket();
+      window.removeEventListener('bybit-trades-updated', handleTradeUpdate);
       if (heartbeatIntervalRef.current) {
         clearInterval(heartbeatIntervalRef.current);
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchTradeData, connectWebSocket, disconnectWebSocket]);
+  }, [fetchTradeData, connectWebSocket, disconnectWebSocket, connectionStatus]);
 
   // Export trades
   const handleExport = () => {

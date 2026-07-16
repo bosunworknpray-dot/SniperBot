@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { getSharedTradingState, setSharedMetrics, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
   BarChart3, Clock, Calendar, RefreshCw, Download,
@@ -203,6 +204,14 @@ export default function PerformanceAnalyticsPage() {
     return !!(apiKey && apiSecret);
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = subscribeToSharedTradingState((state) => {
+      setTotalPnl(state.metrics.totalPnl);
+      setMetrics(prev => prev ? ({ ...prev, totalPnl: state.metrics.totalPnl, dailyPnl: state.metrics.dailyPnl, totalTrades: state.metrics.totalTrades, winRate: state.metrics.winRate }) : prev);
+    });
+    return unsubscribe;
+  }, []);
+
   // Calculate performance metrics from real data
   const calculateMetrics = (
     positions: any[], 
@@ -254,6 +263,18 @@ export default function PerformanceAnalyticsPage() {
       if (point.equity > peak) peak = point.equity;
       const dd = ((point.equity - peak) / peak) * 100;
       if (dd < maxDrawdown) maxDrawdown = dd;
+    });
+
+    setSharedMetrics({
+      totalPnl: Math.round(totalPnlValue * 100) / 100,
+      totalPnlPct: Math.round(totalReturn * 100) / 100,
+      dailyPnl: Math.round(totalPnlValue * 100) / 100,
+      dailyPnlPct: Math.round((totalPnlValue / totalEquity) * 100 * 100) / 100,
+      openPositions: positions.length,
+      totalTrades: totalTrades,
+      winRate: Math.round(winRate * 10) / 10,
+      maxDrawdown: Math.round(maxDrawdown * 100) / 100,
+      riskExposure: Math.min(20, positions.length * 3 + 2),
     });
 
     return {

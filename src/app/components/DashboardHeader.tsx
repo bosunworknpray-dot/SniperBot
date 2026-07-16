@@ -3,7 +3,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
 import { RefreshCw, Bell, Wifi, Loader2, Shield } from 'lucide-react';
 
 interface HeaderData {
@@ -13,6 +13,7 @@ interface HeaderData {
   date: string;
   accountType?: string;
   uid?: string;
+  balance?: number;
   isPaperMode?: boolean;
 }
 
@@ -25,31 +26,19 @@ const getApiCredentials = () => getBybitCredentials();
 // ============== API FUNCTIONS ==============
 
 // Fetch account info
-const fetchAccountInfo = async (): Promise<{ type: string; uid: string } | null> => {
+const fetchAccountInfo = async (): Promise<{ type: string; uid: string; balance: number } | null> => {
   try {
     const { apiKey, apiSecret } = getApiCredentials();
     if (!apiKey || !apiSecret) {
-      return { type: 'Demo', uid: 'N/A' };
+      return { type: 'Demo', uid: 'N/A', balance: 0 };
     }
 
-    const recvWindow = '5000';
-    const params = '';
-    const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
-
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
-      method: 'GET',
-      headers,
-    });
-
-    const data = await safeJsonParse(response);
-
-    if (data?.retCode === 0 && data?.result) {
-      return {
-        type: data.result.accountType || data.result.accType || 'Unified',
-        uid: data.result.uid || data.result.accountUid || 'N/A',
-      };
-    }
-    return null;
+    const balanceData = await fetchBybitWalletBalance(apiKey, apiSecret);
+    return {
+      type: 'Unified',
+      uid: 'N/A',
+      balance: balanceData.totalEquity || 0,
+    };
   } catch (error) {
     console.error('Error fetching account info:', error);
     return null;
@@ -95,6 +84,7 @@ export default function DashboardHeader() {
             isPaperMode: !accountInfo?.uid || accountInfo.uid === 'N/A',
             accountType: accountInfo?.type || prev.accountType,
             uid: accountInfo?.uid || prev.uid,
+            balance: accountInfo?.balance ?? prev.balance,
           }));
         }
       }
@@ -251,6 +241,12 @@ export default function DashboardHeader() {
                 <Shield size={11} className="text-muted-foreground" />
                 <span className="font-mono">UID: {data.uid}</span>
               </div>
+            </>
+          )}
+          {!data.isPaperMode && typeof data.balance === 'number' && data.balance > 0 && (
+            <>
+              <span>·</span>
+              <span className="font-mono text-foreground">Balance: ${data.balance.toFixed(2)}</span>
             </>
           )}
           <span>·</span>

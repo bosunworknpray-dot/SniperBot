@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { appendSharedAlert, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { Bell, Check, X, Filter, Trash2, Settings, RefreshCw, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 interface Alert {
@@ -126,6 +127,13 @@ export default function AlertsPage() {
     return !!(apiKey && apiSecret);
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = subscribeToSharedTradingState((state) => {
+      setAlerts(state.alerts);
+    });
+    return unsubscribe;
+  }, []);
+
   // Generate alert from market data
   const generateAlertFromMarketData = (symbol: string, ticker: any): Alert | null => {
     const price = parseFloat(ticker.lastPrice);
@@ -241,6 +249,7 @@ export default function AlertsPage() {
         const alert = generateAlertFromMarketData(symbol, ticker);
         if (alert) {
           newAlerts.push(alert);
+        appendSharedAlert(alert);
         }
       });
 

@@ -45,19 +45,20 @@ const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ 
     });
 
     const data = await safeJsonParse(response);
-    
-    if (data?.retCode === 0 && data?.result) {
-      const wallet = data.result.list?.[0] || data.result;
-      const totalEquity = wallet?.totalEquity ?? wallet?.equity ?? wallet?.walletBalance ?? '0';
-      const availableBalance = wallet?.availableBalance ?? wallet?.available ?? wallet?.walletBalance ?? '0';
+
+    if (data?.retCode === 0) {
+      const wallet = data?.result?.list?.[0] || data?.result || {};
+      const totalEquity = wallet?.totalEquity ?? wallet?.equity ?? wallet?.walletBalance ?? wallet?.balance ?? '0';
+      const availableBalance = wallet?.availableBalance ?? wallet?.available ?? wallet?.walletBalance ?? wallet?.balance ?? '0';
+      const uid = data?.result?.uid || data?.result?.accountUid || wallet?.uid || 'N/A';
+
       return {
         totalEquity: String(totalEquity),
         availableBalance: String(availableBalance),
-        uid: data.result.uid || data.result.accountUid || 'N/A',
+        uid,
       };
     }
-    
-    // Handle error response
+
     const errorMsg = data?.retMsg || 'Unknown error';
     const errorCode = data?.retCode || 'Unknown';
     throw new Error(`Error ${errorCode}: ${errorMsg}`);
@@ -148,7 +149,10 @@ export default function ApiCredentialsPanel() {
       const latency = Date.now() - start;
       
       const balanceNum = parseFloat(balanceData.totalEquity);
-      const balanceDisplay = balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
+      const availableNum = parseFloat(balanceData.availableBalance);
+      const balanceDisplay = Number.isFinite(balanceNum) && balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
+      const availableDisplay = Number.isFinite(availableNum) && availableNum > 0 ? `${availableNum.toFixed(2)} USDT` : '0.00 USDT';
+      const totalDisplay = Number.isFinite(balanceNum) && balanceNum > 0 ? `${balanceNum.toFixed(2)} USDT` : '0.00 USDT';
 
       setTestResult((prev) => ({
         ...prev,
@@ -160,8 +164,8 @@ export default function ApiCredentialsPanel() {
             balance: balanceDisplay,
             uid: accountData.uid,
             accountType: accountData.accountType,
-            availableBalance: balanceData.availableBalance !== '0' ? `${parseFloat(balanceData.availableBalance).toFixed(2)} USDT` : '0.00 USDT',
-            totalEquity: balanceData.totalEquity !== '0' ? `${parseFloat(balanceData.totalEquity).toFixed(2)} USDT` : '0.00 USDT',
+            availableBalance: availableDisplay,
+            totalEquity: totalDisplay,
           },
         },
       }));

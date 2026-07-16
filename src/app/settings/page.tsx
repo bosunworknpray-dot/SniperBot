@@ -11,6 +11,7 @@ import {
   Network, Database, Activity, Server, Loader2
 } from 'lucide-react';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { setSharedBalance } from '@/lib/tradingState';
 
 // ============== TYPES ==============
 interface ApiCredentials {

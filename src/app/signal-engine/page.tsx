@@ -4,7 +4,8 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
+import { appendSharedAlert, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   Zap, TrendingUp, TrendingDown, RefreshCw, ChevronDown, ChevronUp,
   AlertCircle, CheckCircle, Clock, Filter, Search, X,
@@ -69,6 +70,7 @@ const readPaperTrades = (): any[] => {
 const writePaperTrades = (trades: any[]) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem('paper_trades', JSON.stringify(trades));
+  window.dispatchEvent(new CustomEvent('bybit-trades-updated'));
 };
 
 const readLiveTrades = (): any[] => {
@@ -83,6 +85,7 @@ const readLiveTrades = (): any[] => {
 const writeLiveTrades = (trades: any[]) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem('live_trades', JSON.stringify(trades));
+  window.dispatchEvent(new CustomEvent('bybit-trades-updated'));
 };
 
 const formatPrice = (price: number): string => {
@@ -162,6 +165,14 @@ export default function SignalEnginePage() {
   const [marketData, setMarketData] = useState<Record<string, any>>({});
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [executingSignalId, setExecutingSignalId] = useState<string | null>(null);
+  const [autoTradingEnabled, setAutoTradingEnabled] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSharedTradingState((state) => {
+      setSignals(state.signals);
+    });
+    return unsubscribe;
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const autoExecutionRef = useRef<Set<string>>(new Set());
@@ -311,7 +322,9 @@ export default function SignalEnginePage() {
         new Map(combined.map(s => [s.symbol, s])).values()
       ).sort((a, b) => b.confidence - a.confidence);
 
-      setSignals(uniqueSignals.slice(0, 50));
+      const merged = uniqueSignals.slice(0, 50);
+      setSignals(merged);
+      setSharedSignals(merged as any);
       setLastUpdate(new Date());
 
     } catch (err: any) {
@@ -400,6 +413,22 @@ export default function SignalEnginePage() {
 
   // Initialize
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const storedValue = window.localStorage.getItem('auto_trading_enabled');
+      if (storedValue !== null) {
+        setAutoTradingEnabled(storedValue === 'true');
+      }
+    }
+
+    const handleAutoTradingSettingChanged = (event: Event) => {
+      const customEvent = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof customEvent.detail?.enabled === 'boolean') {
+        setAutoTradingEnabled(customEvent.detail.enabled);
+      }
+    };
+
+    window.addEventListener('auto-trading-settings-changed', handleAutoTradingSettingChanged);
+
     fetchMarketDataAndGenerateSignals();
     connectWebSocket();
 
@@ -412,12 +441,13 @@ export default function SignalEnginePage() {
     return () => {
       clearInterval(interval);
       disconnectWebSocket();
+      window.removeEventListener('auto-trading-settings-changed', handleAutoTradingSettingChanged);
       if (heartbeatIntervalRef.current) {
         clearInterval(heartbeatIntervalRef.current);
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchMarketDataAndGenerateSignals, connectWebSocket, disconnectWebSocket]);
+  }, [fetchMarketDataAndGenerateSignals, connectWebSocket, disconnectWebSocket, connectionStatus]);
 
   // Update statistics
   useEffect(() => {
@@ -430,6 +460,21 @@ export default function SignalEnginePage() {
 
     setStats({ live, pending, rejected, avgConfidence: avgConf });
   }, [signals]);
+
+  useEffect(() => {
+    if (!autoTradingEnabled) return;
+
+    const highConfidenceSignals = signals.filter(
+      (signal) => signal.status === 'live' && signal.confidence >= 80 && !autoExecutionRef.current.has(signal.id)
+    );
+
+    if (highConfidenceSignals.length === 0) return;
+
+    highConfidenceSignals.forEach((signal) => {
+      autoExecutionRef.current.add(signal.id);
+      void handleExecuteSignal(signal, 'live');
+    });
+  }, [signals, autoTradingEnabled]);
 
   const handleRescan = async () => {
     setIsScanning(true);
@@ -491,46 +536,17 @@ export default function SignalEnginePage() {
 
       const size = 0.001;
       const leverage = 5;
-      const recvWindow = '5000';
-      const orderSide = signal.direction === 'LONG' ? 'Buy' : 'Sell';
-      const leverageParams = `category=linear&symbol=${signal.symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`;
-      const leverageHeaders = await createBybitAuthHeaders(apiKey, apiSecret, leverageParams, recvWindow);
-
-      await fetch(`${BYBIT_BASE_URL}/v5/position/set-leverage`, {
-        method: 'POST',
-        headers: {
-          ...leverageHeaders,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          category: 'linear',
-          symbol: signal.symbol,
-          buyLeverage: leverage.toString(),
-          sellLeverage: leverage.toString(),
-        }),
+      const orderResult = await placeBybitOrder({
+        symbol: signal.symbol,
+        side: signal.direction,
+        qty: size,
+        leverage,
+        apiKey,
+        apiSecret,
       });
 
-      const orderParams = `category=linear&symbol=${signal.symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC`;
-      const orderHeaders = await createBybitAuthHeaders(apiKey, apiSecret, orderParams, recvWindow);
-      const orderResponse = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
-        method: 'POST',
-        headers: {
-          ...orderHeaders,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          category: 'linear',
-          symbol: signal.symbol,
-          side: orderSide,
-          orderType: 'Market',
-          qty: size.toString(),
-          timeInForce: 'GTC',
-        }),
-      });
-
-      const orderData = await safeJsonParse(orderResponse);
-      if (orderData?.retCode !== 0) {
-        throw new Error(orderData?.retMsg || 'Bybit rejected the order');
+      if (!orderResult.success) {
+        throw new Error(orderResult.error || 'Bybit rejected the order');
       }
 
       const liveTrades = readLiveTrades();
@@ -556,7 +572,7 @@ export default function SignalEnginePage() {
         leverage,
         liquidationPrice: signal.entryPrice * 0.95,
         source: 'live',
-        orderId: orderData?.result?.orderId,
+        orderId: orderResult.orderId,
       }]);
 
       setSignals(prev => prev.map(s => s.id === signal.id ? { ...s, status: 'executed' } : s));
