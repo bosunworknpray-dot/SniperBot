@@ -71,6 +71,20 @@ const writePaperTrades = (trades: any[]) => {
   window.localStorage.setItem('paper_trades', JSON.stringify(trades));
 };
 
+const readLiveTrades = (): any[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem('live_trades') || '[]');
+  } catch {
+    return [];
+  }
+};
+
+const writeLiveTrades = (trades: any[]) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem('live_trades', JSON.stringify(trades));
+};
+
 const formatPrice = (price: number): string => {
   if (price >= 1000) return price.toFixed(2);
   if (price >= 1) return price.toFixed(4);
@@ -150,6 +164,7 @@ export default function SignalEnginePage() {
   const [executingSignalId, setExecutingSignalId] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const autoExecutionRef = useRef<Set<string>>(new Set());
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -446,11 +461,23 @@ export default function SignalEnginePage() {
           symbol: signal.symbol,
           side: signal.direction,
           entryPrice: signal.entryPrice,
+          exitPrice: signal.entryPrice,
           size: 0.001,
-          status: 'open',
-          openedAt: new Date().toISOString(),
+          pnl: 0,
+          pnlPct: 0,
           confidence: signal.confidence,
-          source: 'signal-engine',
+          regime: signal.regime,
+          entryTime: new Date().toLocaleString(),
+          exitTime: new Date().toLocaleString(),
+          duration: '0m',
+          exitReason: 'Paper trade',
+          slippage: 0,
+          entryTimestamp: Date.now(),
+          exitTimestamp: Date.now(),
+          status: 'open',
+          leverage: 5,
+          liquidationPrice: signal.entryPrice * 0.95,
+          source: 'paper',
         };
         writePaperTrades([...trades, paperTrade]);
         setSignals(prev => prev.map(s => s.id === signal.id ? { ...s, status: 'executed' } : s));
@@ -505,6 +532,32 @@ export default function SignalEnginePage() {
       if (orderData?.retCode !== 0) {
         throw new Error(orderData?.retMsg || 'Bybit rejected the order');
       }
+
+      const liveTrades = readLiveTrades();
+      writeLiveTrades([...liveTrades, {
+        id: `live-${signal.id}`,
+        symbol: signal.symbol,
+        side: signal.direction,
+        entryPrice: signal.entryPrice,
+        exitPrice: signal.entryPrice,
+        size,
+        pnl: 0,
+        pnlPct: 0,
+        confidence: signal.confidence,
+        regime: signal.regime,
+        entryTime: new Date().toLocaleString(),
+        exitTime: new Date().toLocaleString(),
+        duration: '0m',
+        exitReason: 'Live order placed',
+        slippage: 0,
+        entryTimestamp: Date.now(),
+        exitTimestamp: Date.now(),
+        status: 'open',
+        leverage,
+        liquidationPrice: signal.entryPrice * 0.95,
+        source: 'live',
+        orderId: orderData?.result?.orderId,
+      }]);
 
       setSignals(prev => prev.map(s => s.id === signal.id ? { ...s, status: 'executed' } : s));
     } catch (err: any) {

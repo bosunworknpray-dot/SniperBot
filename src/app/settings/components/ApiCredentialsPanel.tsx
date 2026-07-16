@@ -36,10 +36,10 @@ interface TestResult {
 const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ totalEquity: string; availableBalance: string; uid: string }> => {
   try {
     const recvWindow = '5000';
-    const params = '';
+    const params = 'accountType=UNIFIED';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance?${params}`, {
       method: 'GET',
       headers,
     });
@@ -47,10 +47,12 @@ const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ 
     const data = await safeJsonParse(response);
     
     if (data?.retCode === 0 && data?.result) {
-      const wallet = data.result.list?.[0];
+      const wallet = data.result.list?.[0] || data.result;
+      const totalEquity = wallet?.totalEquity ?? wallet?.equity ?? wallet?.walletBalance ?? '0';
+      const availableBalance = wallet?.availableBalance ?? wallet?.available ?? wallet?.walletBalance ?? '0';
       return {
-        totalEquity: wallet?.totalEquity || wallet?.equity || '0',
-        availableBalance: wallet?.availableBalance || wallet?.available || '0',
+        totalEquity: String(totalEquity),
+        availableBalance: String(availableBalance),
         uid: data.result.uid || data.result.accountUid || 'N/A',
       };
     }
@@ -69,10 +71,10 @@ const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ 
 const fetchAccountInfo = async (apiKey: string, apiSecret: string): Promise<{ accountType: string; uid: string }> => {
   try {
     const recvWindow = '5000';
-    const params = '';
+    const params = 'accountType=UNIFIED';
     const headers = await createBybitAuthHeaders(apiKey, apiSecret, params, recvWindow);
 
-    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/info`, {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/account/info?${params}`, {
       method: 'GET',
       headers,
     });

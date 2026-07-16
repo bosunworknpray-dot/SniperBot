@@ -36,6 +36,7 @@ interface Trade {
   orderId?: string;
   tradeType?: 'market' | 'limit';
   positionIdx?: number;
+  source?: 'paper' | 'live' | 'bybit';
 }
 
 interface Position {
@@ -59,6 +60,24 @@ const SUPPORTED_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'
 
 // ============== API HELPERS ==============
 const getApiCredentials = () => getBybitCredentials();
+
+const readPaperTrades = (): any[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem('paper_trades') || '[]');
+  } catch {
+    return [];
+  }
+};
+
+const readLiveTrades = (): any[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem('live_trades') || '[]');
+  } catch {
+    return [];
+  }
+};
 
 const formatPrice = (price: number): string => {
   if (price >= 1000) return price.toFixed(2);
@@ -202,6 +221,16 @@ const fetchTickers = async (symbols: string[]): Promise<Record<string, any>> => 
   } catch (error) {
     console.error('Error fetching tickers:', error);
     return {};
+  }
+};
+
+const getCurrentPrice = async (symbol: string): Promise<number | null> => {
+  try {
+    const response = await fetch(`${BYBIT_BASE_URL}/v5/market/tickers?category=linear&symbol=${symbol}`);
+    const data = await safeJsonParse(response);
+    return parseFloat(data?.result?.list?.[0]?.lastPrice || '0');
+  } catch {
+    return null;
   }
 };
 
@@ -350,11 +379,56 @@ export default function TradeLogsPage() {
       setError(null);
 
       const hasKeys = hasValidCredentials();
-      
+      const paperTrades = readPaperTrades();
+      const localLiveTrades = readLiveTrades();
+
+      const paperEntries = await Promise.all(
+        paperTrades.map(async (trade: any) => {
+          const currentPrice = await getCurrentPrice(trade.symbol);
+          const entryPrice = parseFloat(trade.entryPrice || 0);
+          const size = parseFloat(trade.size || 0.001);
+          let pnl = 0;
+          let pnlPct = 0;
+
+          if (currentPrice && entryPrice) {
+            const move = trade.side === 'LONG' ? currentPrice - entryPrice : entryPrice - currentPrice;
+            pnl = move * size;
+            pnlPct = entryPrice > 0 ? (pnl / (entryPrice * size)) * 100 : 0;
+          }
+
+          return {
+            ...trade,
+            entryPrice: parseFloat(trade.entryPrice || 0),
+            exitPrice: parseFloat(trade.exitPrice || trade.entryPrice || 0),
+            size: parseFloat(trade.size || 0.001),
+            pnl: Math.round(pnl * 100) / 100,
+            pnlPct: Math.round(pnlPct * 10) / 10,
+            status: trade.status || 'open',
+            entryTimestamp: trade.entryTimestamp || Date.now(),
+            exitTimestamp: trade.exitTimestamp || Date.now(),
+            source: 'paper',
+          } as Trade;
+        })
+      );
+
+      const liveEntries = localLiveTrades.map((trade: any) => ({
+        ...trade,
+        entryPrice: parseFloat(trade.entryPrice || 0),
+        exitPrice: parseFloat(trade.exitPrice || trade.entryPrice || 0),
+        size: parseFloat(trade.size || 0.001),
+        pnl: parseFloat(trade.pnl || 0),
+        pnlPct: parseFloat(trade.pnlPct || 0),
+        status: trade.status || 'open',
+        entryTimestamp: trade.entryTimestamp || Date.now(),
+        exitTimestamp: trade.exitTimestamp || Date.now(),
+        source: 'live',
+      } as Trade));
+
       if (!hasKeys) {
         setIsApiConnected(false);
-        setIsLoading(false);
-        setError('API credentials not configured. Please add them to .env.local');
+        setPositions([]);
+        setTrades([...paperEntries, ...liveEntries]);
+        setLastUpdate(new Date());
         return;
       }
 
@@ -364,8 +438,9 @@ export default function TradeLogsPage() {
         fetchOrderHistory(),
       ]);
 
+      const mergedTrades = [...paperEntries, ...liveEntries, ...tradeData];
       setPositions(positionData);
-      setTrades(tradeData);
+      setTrades(mergedTrades);
       setIsApiConnected(true);
       setLastUpdate(new Date());
 
@@ -947,6 +1022,7 @@ export default function TradeLogsPage() {
                     { key: 'confidence' as SortKey, label: 'Conf.' },
                     { key: 'regime' as SortKey, label: 'Regime' },
                     { key: 'duration' as SortKey, label: 'Duration' },
+                    { key: 'source' as SortKey, label: 'Source' },
                     { key: 'exitReason' as SortKey, label: 'Exit Reason' },
                   ].map(({ key, label }) => (
                     <th
@@ -1019,6 +1095,15 @@ export default function TradeLogsPage() {
                     </td>
                     <td className="px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400 font-mono">
                       {trade.duration || '-'}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium capitalize ${
+                        trade.source === 'paper' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400' :
+                        trade.source === 'live' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' :
+                        'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400'
+                      }`}>
+                        {trade.source || 'bybit'}
+                      </span>
                     </td>
                     <td className="px-3 py-2.5">
                       <span className={`text-xs px-1.5 py-0.5 rounded ${
