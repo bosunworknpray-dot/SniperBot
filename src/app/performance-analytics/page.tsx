@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
-import { getSharedTradingState, setSharedMetrics, subscribeToSharedTradingState } from '@/lib/tradingState';
+import { calculateLivePnl, getSharedTradingState, setSharedMetrics, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
   BarChart3, Clock, Calendar, RefreshCw, Download,
@@ -242,9 +242,10 @@ export default function PerformanceAnalyticsPage() {
       }
     });
 
-    // Add unrealized P&L from positions
+    // Add unrealized P&L from positions using the latest ticker price
     positions.forEach((pos: any) => {
-      const pnl = parseFloat(pos.unrealisedPnl || 0);
+      const currentPrice = parseFloat(pos.markPrice || pos.currentPrice || pos.entryPrice || 0);
+      const { pnl } = calculateLivePnl(parseFloat(pos.avgPrice || pos.entryPrice || 0), currentPrice, Math.abs(parseFloat(pos.size || 0)), pos.side === 'Sell' || pos.side === 'SHORT' ? 'SHORT' : 'LONG');
       totalPnlValue += pnl;
     });
 

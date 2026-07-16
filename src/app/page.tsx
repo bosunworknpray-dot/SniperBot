@@ -6,7 +6,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, fetchBybitWalletBalance, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
-import { appendSharedAlert, getSharedTradingState, setSharedBalance, setSharedBotState, setSharedMetrics, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
+import { appendSharedAlert, calculateLivePnl, getSharedTradingState, setSharedBalance, setSharedBotState, setSharedMetrics, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   TrendingUp, TrendingDown, DollarSign, Activity, 
   Zap, Wifi, WifiOff, RefreshCw, AlertCircle,
@@ -494,7 +494,6 @@ export default function Home() {
 
       // Fetch positions
       const positionData = await fetchPositions();
-      setPositions(positionData);
 
       // Fetch order history
       const tradeData = await fetchOrderHistory();
@@ -502,17 +501,28 @@ export default function Home() {
 
       // Fetch ticker data
       const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      const livePositions = positionData.map((pos) => {
+        const currentPrice = parseFloat(tickers[pos.symbol]?.lastPrice || pos.currentPrice || pos.entryPrice || '0');
+        const { pnl, pnlPct } = calculateLivePnl(pos.entryPrice, currentPrice, pos.size, pos.side);
+        return {
+          ...pos,
+          currentPrice: Number.isFinite(currentPrice) ? currentPrice : pos.currentPrice,
+          pnl,
+          pnlPct,
+        };
+      });
+      setPositions(livePositions);
 
       // Calculate metrics
       let totalPnl = 0;
       let dailyPnl = 0;
-      let openPositions = positionData.length;
+      let openPositions = livePositions.length;
       let totalTrades = tradeData.length;
       let wins = 0;
       let losses = 0;
 
       // Calculate P&L from positions
-      positionData.forEach(pos => {
+      livePositions.forEach(pos => {
         totalPnl += pos.pnl;
         dailyPnl += pos.pnl;
       });

@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, placeBybitOrder, safeJsonParse } from '@/lib/bybit';
-import { setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
+import { calculateLivePnl, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
   Activity, Search, Download, ChevronUp, ChevronDown,
   Wifi, WifiOff, RefreshCw, AlertCircle, X, Filter,
@@ -411,8 +411,19 @@ export default function TradeLogsPage() {
         fetchOrderHistory(),
       ]);
 
+      const livePositions = positionData.map((pos) => {
+        const currentPrice = parseFloat(tickerData[pos.symbol]?.lastPrice || pos.markPrice || pos.entryPrice || '0');
+        const { pnl, pnlPct } = calculateLivePnl(pos.entryPrice, currentPrice, pos.size, pos.side);
+        return {
+          ...pos,
+          markPrice: Number.isFinite(currentPrice) ? currentPrice : pos.markPrice,
+          unrealisedPnl: pnl,
+          pnlPct,
+        };
+      });
+
       const mergedTrades = [...paperEntries, ...liveEntries, ...tradeData];
-      setPositions(positionData);
+      setPositions(livePositions as any);
       setTrades(mergedTrades);
       setSharedTrades('paper', paperTrades as any);
       setSharedTrades('live', liveTrades as any);
