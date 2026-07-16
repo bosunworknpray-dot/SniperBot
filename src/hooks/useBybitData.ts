@@ -5,6 +5,10 @@ import { useEffect, useState, useRef } from 'react';
 import { requestManager } from '@/lib/requestManager';
 import { logger } from '@/lib/logger';
 
+// Module-level short-lived caches to de-duplicate identical requests
+const balanceCache: { data: any | null; ts: number; promise: Promise<any> | null } = { data: null, ts: 0, promise: null };
+const positionsCache: { data: any[] | null; ts: number; promise: Promise<any> | null } = { data: null, ts: 0, promise: null };
+
 // ============== BALANCE HOOK ==============
 export interface BalanceData {
   totalEquity: number;
@@ -28,7 +32,23 @@ export function useBybitBalance(autoRefresh = true) {
   const fetchBalance = async () => {
     try {
       setLoading(true);
-      const response = await requestManager.executeWithRateLimit<any>(
+      // Use shared short-lived cache to avoid multiple components triggering
+      // simultaneous identical requests.
+      const now = Date.now();
+      if (balanceCache.data && (now - balanceCache.ts) < 5000) {
+        setData(balanceCache.data);
+        setError(null);
+        return;
+      }
+
+      if (balanceCache.promise) {
+        const cached = await balanceCache.promise;
+        setData(cached);
+        setError(null);
+        return;
+      }
+
+      balanceCache.promise = requestManager.executeWithRateLimit<any>(
         '/api/bybit',
         {
           method: 'POST',
@@ -39,14 +59,20 @@ export function useBybitBalance(autoRefresh = true) {
         }
       );
 
+      const response = await balanceCache.promise;
+      balanceCache.promise = null;
+
       if (response.retCode === 0 && response.result?.list?.[0]) {
         const wallet = response.result.list[0];
-        setData({
-          totalEquity: parseFloat(wallet.totalEquity),
-          availableBalance: parseFloat(wallet.totalAvailableBalance),
-          totalMarginBalance: parseFloat(wallet.totalMarginBalance),
+        const parsed = {
+          totalEquity: parseFloat(wallet.totalEquity || wallet.equity || '0'),
+          availableBalance: parseFloat(wallet.totalAvailableBalance || wallet.availableBalance || wallet.walletBalance || '0'),
+          totalMarginBalance: parseFloat(wallet.totalMarginBalance || '0'),
           coins: wallet.coin || [],
-        });
+        };
+        balanceCache.data = parsed;
+        balanceCache.ts = Date.now();
+        setData(parsed);
         setError(null);
       } else {
         throw new Error('Invalid response format');
@@ -102,7 +128,21 @@ export function useBybitPositions(autoRefresh = true) {
   const fetchPositions = async () => {
     try {
       setLoading(true);
-      const response = await requestManager.executeWithRateLimit<any>(
+      const now = Date.now();
+      if (positionsCache.data && (now - positionsCache.ts) < 3000) {
+        setData(positionsCache.data);
+        setError(null);
+        return;
+      }
+
+      if (positionsCache.promise) {
+        const cached = await positionsCache.promise;
+        setData(cached);
+        setError(null);
+        return;
+      }
+
+      positionsCache.promise = requestManager.executeWithRateLimit<any>(
         '/api/bybit',
         {
           method: 'POST',
@@ -113,10 +153,15 @@ export function useBybitPositions(autoRefresh = true) {
         }
       );
 
+      const response = await positionsCache.promise;
+      positionsCache.promise = null;
+
       if (response.retCode === 0 && response.result?.list) {
         const filtered = response.result.list.filter(
           (pos: any) => pos.size !== '0' && pos.side !== 'None'
         );
+        positionsCache.data = filtered;
+        positionsCache.ts = Date.now();
         setData(filtered);
         setError(null);
       } else {

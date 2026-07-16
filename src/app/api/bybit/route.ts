@@ -43,8 +43,12 @@ async function createBybitSignature(
 }
 
 async function createBybitHeaders(payload: string = ''): Promise<Record<string, string>> {
-  const timestamp = Date.now().toString();
-  const recvWindow = '5000';
+  // Use a larger default recv window to tolerate small clock skew and
+  // intermittent delays. We'll also attempt to sync the server time and
+  // apply a cached offset so signatures use Bybit's clock.
+  const recvWindow = process.env.BYBIT_RECV_WINDOW || '60000';
+  const timestampMs = Math.round(Date.now() + (serverTimeOffsetMs || 0));
+  const timestamp = timestampMs.toString();
   const signature = await createBybitSignature(timestamp, recvWindow, payload);
 
   return {
@@ -54,6 +58,35 @@ async function createBybitHeaders(payload: string = ''): Promise<Record<string, 
     'X-BAPI-RECV-WINDOW': recvWindow,
     'Content-Type': 'application/json',
   };
+}
+
+// Cache of server time offset (serverMs - localMs), refreshed periodically
+let serverTimeOffsetMs: number | null = null;
+let serverTimeCachedAt = 0;
+
+async function ensureServerTimeSynced() {
+  const now = Date.now();
+  // Refresh cache every 60s
+  if (serverTimeOffsetMs !== null && (now - serverTimeCachedAt) < 60000) return;
+
+  try {
+    const resp = await fetch(`${BYBIT_BASE_URL}/v5/market/time`);
+    const data = await resp.json().catch(() => null);
+    if (data && data.retCode === 0 && data.result) {
+      // Bybit returns seconds and nanos; convert to ms
+      const serverSeconds = parseInt(data.result.timeSecond || '0', 10) || 0;
+      const serverMs = serverSeconds * 1000;
+      serverTimeOffsetMs = serverMs - Date.now();
+      serverTimeCachedAt = Date.now();
+      logger.debug('Bybit API', 'Synced server time', { offsetMs: serverTimeOffsetMs });
+    } else {
+      serverTimeOffsetMs = 0;
+      serverTimeCachedAt = Date.now();
+    }
+  } catch (e) {
+    serverTimeOffsetMs = 0;
+    serverTimeCachedAt = Date.now();
+  }
 }
 
 // ============== WALLET BALANCE ==============
@@ -115,6 +148,8 @@ export async function POST(req: NextRequest) {
         signature_payload = JSON.stringify(requestBody);
       }
       
+      // Ensure server time offset is fresh before signing requests
+      await ensureServerTimeSynced();
       const headers = await createBybitHeaders(signature_payload);
 
       logger.debug('Bybit API', `${method} ${endpoint}`, { payload: signature_payload });
