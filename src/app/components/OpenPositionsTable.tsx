@@ -3,7 +3,8 @@
 'use client';
 
 // ============== IMPORTS ==============
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { realtimeManager } from '@/lib/realtimeManager';
 import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 import { X, TrendingUp, TrendingDown, ChevronUp, ChevronDown, Loader2, RefreshCw, Plus, Minus } from 'lucide-react';
 import StatusBadge from '@/components/ui/StatusBadge';
@@ -105,58 +106,25 @@ export default function OpenPositionsTable() {
       setIsRefreshing(false);
     }
   };
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      console.error('Failed to connect OpenPositions WebSocket:', err);
-    }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    stopHeartbeat();
-  };
-
+  // Use centralized realtime manager instead of per-component WebSocket.
   useEffect(() => {
-    fetchPositions();
-    connectWebSocket();
+    // initial data load
+    refetch();
+
+    // Subscribe to manager data updates to refresh this view
+    const unsubscribe = realtimeManager.subscribeData(() => {
+      refetch();
+    });
 
     const interval = setInterval(() => {
       if (!isRefreshing) {
-        fetchPositions();
+        refetch();
       }
     }, 30000);
 
     return () => {
       clearInterval(interval);
-      disconnectWebSocket();
+      if (unsubscribe) unsubscribe();
     };
   }, []);
 

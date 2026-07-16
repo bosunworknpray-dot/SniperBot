@@ -106,9 +106,11 @@ class RealtimeManager {
     try {
       if (typeof window === 'undefined') return;
       if (this.ws) return;
+      console.debug('[RealtimeManager] connectWebSocket: opening connection');
       this.ws = new WebSocket(BYBIT_WS_URL);
       this.ws.onopen = () => {
         logger.info('RealtimeManager', 'ws open');
+        console.debug('[RealtimeManager] ws open');
         // Do not auto-subscribe to symbols here; consumers decide via server-side REST or manager polling.
         if (this.wsHeartbeat) clearInterval(this.wsHeartbeat);
         this.wsHeartbeat = setInterval(() => {
@@ -120,6 +122,7 @@ class RealtimeManager {
           const payload = JSON.parse(ev.data as string);
           if (payload?.topic && payload.topic.startsWith('tickers')) {
             this.emitTick(payload.data || payload);
+            console.debug('[RealtimeManager] received tick', payload?.topic);
           }
         } catch (e) {
           // ignore
@@ -130,9 +133,11 @@ class RealtimeManager {
         if (this.wsHeartbeat) { clearInterval(this.wsHeartbeat); this.wsHeartbeat = null; }
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 5000);
+        console.debug('[RealtimeManager] ws closed, scheduled reconnect');
       };
       this.ws.onerror = () => {
         logger.error('RealtimeManager', 'ws error');
+        console.debug('[RealtimeManager] ws error');
       };
     } catch (err) {
       logger.error('RealtimeManager', 'connectWebSocket failed', { error: (err as Error).message });
@@ -141,6 +146,7 @@ class RealtimeManager {
 
   // Allow consumers to request an immediate refresh
   triggerRefresh() {
+    console.debug('[RealtimeManager] triggerRefresh called');
     this.fetchOnce().catch(() => {});
   }
 

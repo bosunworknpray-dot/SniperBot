@@ -313,9 +313,8 @@ export default function BotControlPanel() {
     toast.info('Restarting signal engine...');
 
     try {
-      disconnectWebSocket();
-      await new Promise((r) => setTimeout(r, 500));
-      connectWebSocket();
+      // Use singleton to trigger refresh instead of per-component socket ops
+      realtimeManager.triggerRefresh();
       await fetchSystemStatus();
       setLastScan(new Date().toLocaleTimeString());
       setNextScan('5m');

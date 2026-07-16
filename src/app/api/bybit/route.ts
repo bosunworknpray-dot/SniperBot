@@ -63,6 +63,8 @@ async function createBybitHeaders(payload: string = ''): Promise<Record<string, 
 // Cache of server time offset (serverMs - localMs), refreshed periodically
 let serverTimeOffsetMs: number | null = null;
 let serverTimeCachedAt = 0;
+// Lightweight counter for POST requests (in-memory, dev diagnostics only)
+let bybitPostCount = 0;
 
 async function ensureServerTimeSynced() {
   const now = Date.now();
@@ -92,6 +94,9 @@ async function ensureServerTimeSynced() {
 // ============== WALLET BALANCE ==============
 export async function POST(req: NextRequest) {
   try {
+    bybitPostCount++;
+    try { (globalThis as any).bybitPostCount = bybitPostCount; } catch (_) {}
+    logger.info('Bybit API', 'POST request count', { count: bybitPostCount });
     let endpoint: string | null = null;
     let method = 'GET';
     let body: any = null;
@@ -264,6 +269,11 @@ export async function GET(req: NextRequest) {
 
   if (!endpoint) {
     return NextResponse.json({ error: 'Missing endpoint' }, { status: 400 });
+  }
+
+  // Diagnostic: return in-memory POST count
+  if (endpoint === 'stats') {
+    return NextResponse.json({ count: bybitPostCount });
   }
 
   return POST(
