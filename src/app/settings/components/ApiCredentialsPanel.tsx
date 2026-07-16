@@ -29,9 +29,10 @@ interface TestResult {
 const BYBIT_BASE_URL = 'https://api.bybit.com';
 
 // ============== API HELPERS ==============
-const generateSignature = (apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
+const generateSignature = (apiKey: string, apiSecret: string, timestamp: string, recvWindow: string, params: string) => {
   const crypto = require('crypto');
-  const paramStr = timestamp + apiSecret + recvWindow + params;
+  // Bybit V5 signature format: timestamp + apiKey + recvWindow + params
+  const paramStr = timestamp + apiKey + recvWindow + params;
   return crypto.createHmac('sha256', apiSecret).update(paramStr).digest('hex');
 };
 
@@ -53,7 +54,7 @@ const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ 
     const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const params = '';
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/account/wallet-balance`, {
       method: 'GET',
@@ -75,10 +76,14 @@ const fetchWalletBalance = async (apiKey: string, apiSecret: string): Promise<{ 
         uid: data.result.uid || data.result.accountUid || 'N/A',
       };
     }
-    return { totalEquity: '0', availableBalance: '0', uid: 'N/A' };
+    
+    // Handle error response
+    const errorMsg = data?.retMsg || 'Unknown error';
+    const errorCode = data?.retCode || 'Unknown';
+    throw new Error(`Error ${errorCode}: ${errorMsg}`);
   } catch (error) {
     console.error('Error fetching wallet balance:', error);
-    return { totalEquity: '0', availableBalance: '0', uid: 'N/A' };
+    throw error;
   }
 };
 
@@ -88,7 +93,7 @@ const fetchAccountInfo = async (apiKey: string, apiSecret: string): Promise<{ ac
     const timestamp = Date.now().toString();
     const recvWindow = '5000';
     const params = '';
-    const signature = generateSignature(apiSecret, timestamp, recvWindow, params);
+    const signature = generateSignature(apiKey, apiSecret, timestamp, recvWindow, params);
 
     const response = await fetch(`${BYBIT_BASE_URL}/v5/account/info`, {
       method: 'GET',
@@ -108,21 +113,24 @@ const fetchAccountInfo = async (apiKey: string, apiSecret: string): Promise<{ ac
         uid: data.result.uid || data.result.accountUid || 'N/A',
       };
     }
-    return { accountType: 'Unified', uid: 'N/A' };
+    
+    const errorMsg = data?.retMsg || 'Unknown error';
+    const errorCode = data?.retCode || 'Unknown';
+    throw new Error(`Error ${errorCode}: ${errorMsg}`);
   } catch (error) {
     console.error('Error fetching account info:', error);
-    return { accountType: 'Unified', uid: 'N/A' };
+    throw error;
   }
 };
 
 // ============== COMPONENT ==============
 
 export default function ApiCredentialsPanel() {
-  const [activeMode, setActiveMode] = useState<TradingMode>('paper');
+  const [activeMode, setActiveMode] = useState<TradingMode>('live');
   const [showSecret, setShowSecret] = useState<Record<TradingMode, boolean>>({ paper: false, live: false });
   const [credentials, setCredentials] = useState<Record<TradingMode, Credentials>>({
     paper: { apiKey: '', apiSecret: '' },
-    live: { apiKey: '', apiSecret: '' },
+    live: { apiKey: process.env.NEXT_PUBLIC_BYBIT_API_KEY || '', apiSecret: process.env.NEXT_PUBLIC_BYBIT_API_SECRET || '' },
   });
   const [testResult, setTestResult] = useState<Record<TradingMode, TestResult>>({
     paper: { status: 'idle', message: '' },
@@ -141,14 +149,26 @@ export default function ApiCredentialsPanel() {
       return;
     }
 
-    setTestResult((prev) => ({ ...prev, [mode]: { status: 'testing', message: 'Connecting to Bybit...' } }));
+    // Validate API key format
+    if (creds.apiKey.length < 20) {
+      setTestResult((prev) => ({ 
+        ...prev, 
+        [mode]: { 
+          status: 'error', 
+          message: '⚠️ API key appears to be invalid. Bybit API keys are typically 32+ characters. Please check your API credentials.' 
+        } 
+      }));
+      return;
+    }
+
+    setTestResult((prev) => ({ ...prev, [mode]: { status: 'testing', message: 'Connecting to Bybit Mainnet...' } }));
     const start = Date.now();
 
     try {
-      // Fetch wallet balance
+      // Fetch wallet balance first (most reliable endpoint)
       const balanceData = await fetchWalletBalance(creds.apiKey, creds.apiSecret);
       
-      // Fetch account info
+      // Then fetch account info
       const accountData = await fetchAccountInfo(creds.apiKey, creds.apiSecret);
       
       const latency = Date.now() - start;
@@ -160,7 +180,7 @@ export default function ApiCredentialsPanel() {
         ...prev,
         [mode]: {
           status: 'success',
-          message: `✅ Connected to ${mode === 'live' ? 'Live' : 'Testnet'} Unified Trading Account`,
+          message: `✅ Connected to Bybit Mainnet Unified Trading Account`,
           latency,
           accountInfo: {
             balance: balanceDisplay,
@@ -177,9 +197,18 @@ export default function ApiCredentialsPanel() {
       
       let userMessage = error.message || '❌ Failed to connect. Check your credentials and network.';
       
-      if (error.message?.includes('fetch') || error.message?.includes('network')) {
+      // Parse common Bybit errors
+      if (userMessage.includes('10005')) {
+        userMessage = '❌ Invalid API key. Please check your API key.';
+      } else if (userMessage.includes('10006')) {
+        userMessage = '❌ Invalid API signature. Please check your API secret.';
+      } else if (userMessage.includes('10003')) {
+        userMessage = '❌ Rate limit exceeded. Please try again later.';
+      } else if (userMessage.includes('10010')) {
+        userMessage = '❌ API key permissions insufficient. Please ensure your API key has read permissions.';
+      } else if (userMessage.includes('fetch') || userMessage.includes('network')) {
         userMessage = '❌ Network error. Please check your internet connection.';
-      } else if (error.message?.includes('timeout')) {
+      } else if (userMessage.includes('timeout')) {
         userMessage = '❌ Connection timeout. Please try again.';
       }
 
@@ -196,6 +225,9 @@ export default function ApiCredentialsPanel() {
 
   const result = testResult[activeMode];
   const creds = credentials[activeMode];
+
+  // Check if API key looks valid (basic validation)
+  const hasValidKey = creds.apiKey && creds.apiKey.length >= 20;
 
   return (
     <div className="bg-card border border-border rounded-xl p-6">
@@ -237,6 +269,17 @@ export default function ApiCredentialsPanel() {
         </div>
       )}
 
+      {/* Credential Status */}
+      <div className="mb-4 p-2 rounded-lg bg-muted/30 border border-border text-xs flex items-center gap-2">
+        <span className={`w-2 h-2 rounded-full ${hasValidKey ? 'bg-green-500' : 'bg-yellow-500'}`} />
+        <span className="text-muted-foreground">
+          {hasValidKey ? 'API key loaded from environment' : 'No API key configured'}
+        </span>
+        <span className="text-[10px] text-muted-foreground ml-auto font-mono">
+          {creds.apiKey ? `${creds.apiKey.slice(0, 8)}...${creds.apiKey.slice(-4)}` : 'Not set'}
+        </span>
+      </div>
+
       {/* Fields */}
       <div className="space-y-4">
         <div>
@@ -247,9 +290,16 @@ export default function ApiCredentialsPanel() {
             type="text"
             value={creds.apiKey}
             onChange={(e) => handleChange(activeMode, 'apiKey', e.target.value)}
-            placeholder={activeMode === 'paper' ? 'Bybit Testnet API Key' : 'Bybit Mainnet API Key'}
-            className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 font-mono"
+            placeholder="Enter your Bybit Mainnet API Key"
+            className={`w-full bg-background border rounded-lg px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 font-mono ${
+              creds.apiKey && creds.apiKey.length < 20 ? 'border-yellow-500' : 'border-border'
+            }`}
           />
+          {creds.apiKey && creds.apiKey.length < 20 && (
+            <p className="text-yellow-600 dark:text-yellow-400 text-[10px] mt-1">
+              ⚠️ API key is shorter than expected. Bybit API keys are typically 32+ characters.
+            </p>
+          )}
         </div>
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1.5">
@@ -283,7 +333,7 @@ export default function ApiCredentialsPanel() {
         }`}
       >
         {result.status === 'testing' ? (
-          <><Loader2 size={15} className="animate-spin" /> Testing Connection...</>
+          <><Loader2 size={15} className="animate-spin" /> Connecting to Bybit Mainnet...</>
         ) : (
           'Test Connection'
         )}
