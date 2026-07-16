@@ -1,6 +1,5 @@
 {
   "/page": "app/page.js",
-  "/performance-analytics/page": "app/performance-analytics/page.js",
   "/signal-engine/page": "app/signal-engine/page.js",
   "/trade-logs/page": "app/trade-logs/page.js",
   "/settings/page": "app/settings/page.js"
