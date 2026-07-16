@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import ConfirmModal from '@/components/ui/ConfirmModal';
 import { toast } from 'sonner';
+import { realtimeManager } from '@/lib/realtimeManager';
 
 interface SystemStatus {
   websocket: { status: 'connected' | 'disconnected' | 'connecting' | 'authenticated'; latency: number };
@@ -225,114 +226,19 @@ export default function BotControlPanel() {
     }
   };
 
-  // Connect WebSocket
-  const connectWebSocket = () => {
-    try {
-      setSystemStatus(prev => ({
-        ...prev,
-        websocket: { ...prev.websocket, status: 'connecting' },
-      }));
-
-      const ws = new WebSocket(BYBIT_WS_URL);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('WebSocket connected');
-        setSystemStatus(prev => ({
-          ...prev,
-          websocket: { ...prev.websocket, status: 'connected', latency: 0 },
-        }));
-
-        ws.send(JSON.stringify({
-          op: 'subscribe',
-          args: SUPPORTED_SYMBOLS.map(s => `tickers.${s}`)
-        }));
-
-        startHeartbeat();
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.topic === 'tickers') {
-            // Update last scan time on price updates
-            setLastScan(new Date().toLocaleTimeString());
-            setSystemStatus(prev => ({
-              ...prev,
-              signalEngine: { ...prev.signalEngine, lastRun: new Date().toLocaleTimeString() },
-            }));
-          } else if (data.op === 'pong') {
-            setSystemStatus(prev => ({
-              ...prev,
-              websocket: { ...prev.websocket, latency: 0 },
-            }));
-          }
-        } catch (err) {
-          // Ignore
-        }
-      };
-
-      ws.onerror = () => {
-        setSystemStatus(prev => ({
-          ...prev,
-          websocket: { ...prev.websocket, status: 'disconnected' },
-        }));
-      };
-
-      ws.onclose = () => {
-        console.log('WebSocket disconnected');
-        setSystemStatus(prev => ({
-          ...prev,
-          websocket: { ...prev.websocket, status: 'disconnected' },
-        }));
-        stopHeartbeat();
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000);
-      };
-    } catch (err) {
-      console.error('Failed to connect WebSocket:', err);
-      setSystemStatus(prev => ({
-        ...prev,
-        websocket: { ...prev.websocket, status: 'disconnected' },
-      }));
-    }
-  };
-
-  const startHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-    }
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ op: 'ping' }));
-      }
-    }, 30000);
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  };
-
-  const disconnectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    stopHeartbeat();
-  };
+  // Use singleton realtime manager for ticks
+  const disconnectWebSocket = () => { /* noop - singleton handles lifecycle */ };
 
   useEffect(() => {
     fetchSystemStatus();
-    connectWebSocket();
+
+    const unsubscribe = realtimeManager.subscribeTicks(() => {
+      setLastScan(new Date().toLocaleTimeString());
+      setSystemStatus(prev => ({
+        ...prev,
+        signalEngine: { ...prev.signalEngine, lastRun: new Date().toLocaleTimeString() },
+      }));
+    });
 
     const interval = setInterval(fetchSystemStatus, 30000);
     const scanInterval = setInterval(() => {
@@ -346,7 +252,7 @@ export default function BotControlPanel() {
     return () => {
       clearInterval(interval);
       clearInterval(scanInterval);
-      disconnectWebSocket();
+      unsubscribe();
     };
   }, []);
 
