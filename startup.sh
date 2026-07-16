@@ -77,6 +77,17 @@ if command -v nginx >/dev/null 2>&1; then
 
     echo "⚙ Configuring Nginx..."
 
+    if [[ -f "cert.pem" && -f "cert.key" ]]; then
+        echo "📄 Local Cloudflare certs found in repo root. Installing to /etc/ssl/cloudflare..."
+        sudo mkdir -p /etc/ssl/cloudflare
+        sudo cp -f cert.pem /etc/ssl/cloudflare/cert.pem
+        sudo cp -f cert.key /etc/ssl/cloudflare/cert.key
+        sudo chmod 644 /etc/ssl/cloudflare/cert.pem
+        sudo chmod 600 /etc/ssl/cloudflare/cert.key
+    else
+        echo "⚠️ Local cert.pem and cert.key not found in repo root. Using existing /etc/ssl/cloudflare files."
+    fi
+
     sudo mkdir -p /etc/nginx/sites-available
     sudo mkdir -p /etc/nginx/sites-enabled
 
@@ -142,4 +153,4 @@ echo "⚠️ MAINNET TRADING ENABLED"
 echo "⚠️ REAL MONEY IS AT RISK"
 echo
 
-HOSTNAME="${HOST}" PORT="${PORT}" npm run serve
+HOSTNAME="${HOST}" PORT="${PORT}" npm run serve -- -H 127.0.0.1 -p 4028
