@@ -438,6 +438,16 @@ export default function Home() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const positionsRef = useRef<Position[]>([]);
+  const tradesRef = useRef<Trade[]>([]);
+
+  useEffect(() => {
+    positionsRef.current = positions;
+  }, [positions]);
+
+  useEffect(() => {
+    tradesRef.current = trades;
+  }, [trades]);
 
   useEffect(() => {
     const unsubscribe = subscribeToSharedTradingState((state) => {
@@ -457,6 +467,84 @@ export default function Home() {
     const { apiKey, apiSecret } = getApiCredentials();
     return !!(apiKey && apiSecret);
   }, []);
+
+  const refreshPnlSnapshot = useCallback(async () => {
+    if (!hasValidCredentials()) return;
+
+    try {
+      const tickers = await fetchTickers(SUPPORTED_SYMBOLS);
+      const livePositions = positionsRef.current.map((pos) => {
+        const currentPrice = parseFloat(tickers[pos.symbol]?.lastPrice || pos.currentPrice || pos.entryPrice || '0');
+        const { pnl, pnlPct } = calculateLivePnl(pos.entryPrice, currentPrice, pos.size, pos.side);
+        return {
+          ...pos,
+          currentPrice: Number.isFinite(currentPrice) ? currentPrice : pos.currentPrice,
+          pnl,
+          pnlPct,
+        };
+      });
+
+      const currentTrades = tradesRef.current.map((trade) => {
+        if (trade.status !== 'open') return trade;
+
+        const currentPrice = parseFloat(tickers[trade.symbol]?.lastPrice || '0');
+        const { pnl, pnlPct } = calculateLivePnl(trade.entryPrice, currentPrice, trade.size, trade.side);
+        return {
+          ...trade,
+          pnl,
+          pnlPct,
+          exitPrice: currentPrice || trade.exitPrice,
+        };
+      });
+
+      let totalPnl = 0;
+      let dailyPnl = 0;
+      livePositions.forEach((pos) => {
+        totalPnl += pos.pnl;
+        dailyPnl += pos.pnl;
+      });
+      currentTrades.forEach((trade) => {
+        if (trade.status === 'open') {
+          totalPnl += trade.pnl;
+          dailyPnl += trade.pnl;
+        }
+      });
+
+      const totalEquity = actualBalance > 0 ? actualBalance : metrics.totalBalance;
+      const totalReturn = baseEquity > 0 ? ((totalEquity - baseEquity) / baseEquity) * 100 : 0;
+      const nextMetrics = {
+        totalBalance: totalEquity,
+        availableBalance: metrics.availableBalance,
+        equity: totalEquity,
+        totalPnl: Math.round(totalPnl * 100) / 100,
+        totalPnlPct: Math.round(totalReturn * 100) / 100,
+        dailyPnl: Math.round(dailyPnl * 100) / 100,
+        dailyPnlPct: totalEquity > 0 ? Math.round((dailyPnl / totalEquity) * 100 * 100) / 100 : 0,
+        openPositions: livePositions.length,
+        totalTrades: metrics.totalTrades,
+        winRate: metrics.winRate,
+        maxDrawdown: metrics.maxDrawdown,
+        riskExposure: metrics.riskExposure,
+      };
+
+      setPositions(livePositions);
+      setTrades(currentTrades);
+      setMetrics(prev => ({ ...prev, ...nextMetrics }));
+      setSharedMetrics({
+        totalPnl: nextMetrics.totalPnl,
+        totalPnlPct: nextMetrics.totalPnlPct,
+        dailyPnl: nextMetrics.dailyPnl,
+        dailyPnlPct: nextMetrics.dailyPnlPct,
+        openPositions: nextMetrics.openPositions,
+        totalTrades: nextMetrics.totalTrades,
+        winRate: nextMetrics.winRate,
+        maxDrawdown: nextMetrics.maxDrawdown,
+        riskExposure: nextMetrics.riskExposure,
+      });
+    } catch (err) {
+      console.error('Error refreshing P&L snapshot:', err);
+    }
+  }, [actualBalance, baseEquity, hasValidCredentials, metrics.availableBalance, metrics.maxDrawdown, metrics.riskExposure, metrics.totalBalance, metrics.totalTrades, metrics.winRate]);
 
   // Fetch all data
   const fetchAllData = useCallback(async () => {
@@ -822,7 +910,8 @@ export default function Home() {
       if (connectionStatus === 'disconnected') {
         fetchAllData();
       }
-    }, 60000);
+      void refreshPnlSnapshot();
+    }, 30000);
 
     return () => {
       clearInterval(interval);
@@ -832,7 +921,7 @@ export default function Home() {
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [fetchAllData, connectWebSocket, disconnectWebSocket, connectionStatus]);
+  }, [fetchAllData, connectWebSocket, disconnectWebSocket, connectionStatus, refreshPnlSnapshot]);
 
   // Update bot uptime
   useEffect(() => {
