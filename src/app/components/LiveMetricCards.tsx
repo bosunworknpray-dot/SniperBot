@@ -2,7 +2,7 @@
 
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 import { getSharedTradingState, subscribeToSharedTradingState } from '@/lib/tradingState';
 import {
@@ -116,18 +116,30 @@ export default function LiveMetricCards() {
     return sum + (parseFloat(pos.size) * parseFloat(pos.markPrice));
   }, 0) || 0;
 
-  const isConnected = !error && !!realtimeData;
-  const balanceLabel = formatCurrency(balance);
-  const availableBalanceLabel = formatCurrency(availableBalance);
-  const positionsValueLabel = formatCurrency(totalPositionValue);
-  const connectionStatus = isConnected ? 'Live' : 'Offline';
-  const connectionSubText = error ? 'API Error' : 'Connected to Bybit';
-  const equityChangeText = positionCount > 0 ? `+${(positionCount * 0.5).toFixed(2)}%` : '0%';
-
   const formatCurrency = (value: number) => {
     if (!showBalance) return '••••••';
     return `$${value.toFixed(2)}`;
   };
+
+  const isConnected = useMemo(() => !error && !!realtimeData, [error, realtimeData]);
+
+  const {
+    balanceLabel,
+    availableBalanceLabel,
+    positionsValueLabel,
+    connectionStatus,
+    connectionSubText,
+    equityChangeText,
+  } = useMemo(() => {
+    return {
+      balanceLabel: formatCurrency(balance),
+      availableBalanceLabel: formatCurrency(availableBalance),
+      positionsValueLabel: formatCurrency(totalPositionValue),
+      connectionStatus: isConnected ? 'Live' : 'Offline',
+      connectionSubText: error ? 'API Error' : 'Connected to Bybit',
+      equityChangeText: positionCount > 0 ? `+${(positionCount * 0.5).toFixed(2)}%` : '0%',
+    };
+  }, [balance, availableBalance, totalPositionValue, error, isConnected, positionCount, showBalance]);
 
   if (isLoading || !realtimeData) {
     return (
