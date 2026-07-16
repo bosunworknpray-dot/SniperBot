@@ -149,6 +149,10 @@ const fetchKline = async (symbol: string, interval: string = '15', limit: number
 // ============== COMPONENT ==============
 
 export default function SignalEnginePage() {
+  // Simple in-memory cache for wallet balance to avoid repeated POST /api/bybit
+  // calls during bursts of executions. Cached for 60 seconds.
+  const walletCacheRef = useRef<{ available: number; ts: number } | null>(null);
+
   const [signals, setSignals] = useState<Signal[]>([]);
   const [indicators] = useState<Indicator[]>([
     { id: 'rsi', label: 'RSI (14)', enabled: true, category: 'momentum' },
@@ -505,17 +509,34 @@ export default function SignalEnginePage() {
 
   useEffect(() => {
     if (!autoTradingEnabled) return;
-
     const highConfidenceSignals = signals.filter(
       (signal) => signal.status === 'live' && signal.confidence >= 80 && !autoExecutionRef.current.has(signal.id)
     );
 
     if (highConfidenceSignals.length === 0) return;
 
-    highConfidenceSignals.forEach((signal) => {
-      autoExecutionRef.current.add(signal.id);
-      void handleExecuteSignal(signal, 'live');
-    });
+    // Limit concurrent live trades to a maximum (default 10)
+    const MAX_CONCURRENT_LIVE = parseInt(process.env.NEXT_PUBLIC_MAX_CONCURRENT_LIVE || '10', 10);
+    const currentLiveCount = readLiveTrades().filter(t => t.status === 'open').length;
+    const availableSlots = Math.max(0, MAX_CONCURRENT_LIVE - currentLiveCount);
+    if (availableSlots <= 0) return;
+
+    // Serialize executions to avoid a burst of simultaneous POST requests.
+    (async () => {
+      const toExecute = highConfidenceSignals.slice(0, availableSlots);
+      for (const signal of toExecute) {
+        autoExecutionRef.current.add(signal.id);
+        try {
+          // Await to serialize the requests
+          // eslint-disable-next-line no-await-in-loop
+          await handleExecuteSignal(signal, 'live');
+        } catch (e) {
+          // swallow here since handleExecuteSignal handles errors
+        } finally {
+          autoExecutionRef.current.delete(signal.id);
+        }
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signals, autoTradingEnabled]);
 
@@ -577,15 +598,35 @@ export default function SignalEnginePage() {
         throw new Error('Live trading credentials are not configured. Add them in Settings first.');
       }
 
-      // Calculate conservative live order size based on available balance and risk
-      const stateResp = await fetch('/api/bybit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ endpoint: '/v5/account/wallet-balance', method: 'GET' }),
-      });
-      const wallet = await stateResp.json();
-      const available = parseFloat(wallet?.result?.list?.[0]?.availableBalance || wallet?.result?.list?.[0]?.walletBalance || '0') || 0;
-      const maxRiskPct = parseFloat(process.env.NEXT_PUBLIC_AUTO_EXECUTE_MAX_RISK_PCT || '2');
+      // Enforce global max concurrent live trades
+      const MAX_CONCURRENT_LIVE = parseInt(process.env.NEXT_PUBLIC_MAX_CONCURRENT_LIVE || '10', 10);
+      const currentLive = readLiveTrades().filter(t => t.status === 'open').length;
+      if (currentLive >= MAX_CONCURRENT_LIVE) {
+        throw new Error('Max concurrent live trades reached');
+      }
+
+      // Calculate conservative live order size based on total equity and risk.
+      // Use a short-lived cache to avoid repeated /api/bybit calls during bursts.
+      let available = 0;
+      const now = Date.now();
+      if (walletCacheRef.current && (now - walletCacheRef.current.ts) < 60000) {
+        available = walletCacheRef.current.available;
+      } else {
+        const stateResp = await fetch('/api/bybit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: '/v5/account/wallet-balance', method: 'GET' }),
+        });
+        const wallet = await stateResp.json();
+        // Prefer totalEquity when present (treat as account balance), fallback to availableBalance/walletBalance
+        const totalEquity = parseFloat(wallet?.result?.list?.[0]?.totalEquity || wallet?.result?.list?.[0]?.equity || '0') || 0;
+        const avail = parseFloat(wallet?.result?.list?.[0]?.availableBalance || wallet?.result?.list?.[0]?.walletBalance || '0') || 0;
+        available = totalEquity > 0 ? totalEquity : avail;
+        walletCacheRef.current = { available, ts: now };
+      }
+      // Use 10% of total equity for each trade by default (can be overridden
+      // by NEXT_PUBLIC_AUTO_EXECUTE_MAX_RISK_PCT).
+      const maxRiskPct = parseFloat(process.env.NEXT_PUBLIC_AUTO_EXECUTE_MAX_RISK_PCT || '10');
       const accountRisk = available * (maxRiskPct / 100);
       const priceDiff = Math.abs(signal.entryPrice - signal.sl);
       let size = priceDiff > 0 ? accountRisk / priceDiff : 0;
@@ -598,7 +639,9 @@ export default function SignalEnginePage() {
       const leverage = 5;
       const requiredMargin = (size * signal.entryPrice) / leverage;
       if (requiredMargin > available) {
-        size = (available * 0.8 * leverage) / signal.entryPrice;
+        // If required margin exceeds available, fall back to using the
+        // configured percent of total equity (times leverage).
+        size = (available * (maxRiskPct / 100) * leverage) / signal.entryPrice;
         if (size < MIN_SIZE) throw new Error('Insufficient funds to place order');
       }
 

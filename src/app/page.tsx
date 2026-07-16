@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, getBybitCredentials, createBybitAuthHeaders, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, getBybitCredentials, createBybitAuthHeaders, safeJsonParse, fetchBybitWalletBalance } from '@/lib/bybit';
 import { useSharedRealtimeData } from '@/lib/realtimeDataContext';
 import { appendSharedAlert, calculateLivePnl, getSharedTradingState, setSharedBalance, setSharedBotState, setSharedMetrics, setSharedSignals, setSharedTrades, subscribeToSharedTradingState } from '@/lib/tradingState';
 import { 
