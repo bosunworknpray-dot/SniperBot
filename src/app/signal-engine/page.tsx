@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
-import { BYBIT_BASE_URL, safeJsonParse } from '@/lib/bybit';
+import { BYBIT_BASE_URL, createBybitAuthHeaders, getBybitCredentials, safeJsonParse } from '@/lib/bybit';
 import { 
   Zap, TrendingUp, TrendingDown, RefreshCw, ChevronDown, ChevronUp,
   AlertCircle, CheckCircle, Clock, Filter, Search, X,
@@ -55,7 +55,21 @@ const SUPPORTED_SYMBOLS = [
 ];
 
 // ============== API HELPERS ==============
-const getApiCredentials = () => ({ apiKey: '', apiSecret: '' });
+const getApiCredentials = () => getBybitCredentials();
+
+const readPaperTrades = (): any[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem('paper_trades') || '[]');
+  } catch {
+    return [];
+  }
+};
+
+const writePaperTrades = (trades: any[]) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem('paper_trades', JSON.stringify(trades));
+};
 
 const formatPrice = (price: number): string => {
   if (price >= 1000) return price.toFixed(2);
@@ -133,6 +147,7 @@ export default function SignalEnginePage() {
   const [stats, setStats] = useState({ live: 0, pending: 0, rejected: 0, avgConfidence: 0 });
   const [marketData, setMarketData] = useState<Record<string, any>>({});
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [executingSignalId, setExecutingSignalId] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -419,10 +434,85 @@ export default function SignalEnginePage() {
     }
   };
 
-  const handleExecuteSignal = (id: string) => {
-    setSignals(prev => prev.map(s => 
-      s.id === id ? { ...s, status: 'executed' } : s
-    ));
+  const handleExecuteSignal = async (signal: Signal, mode: 'paper' | 'live') => {
+    setExecutingSignalId(signal.id);
+    setError(null);
+
+    try {
+      if (mode === 'paper') {
+        const trades = readPaperTrades();
+        const paperTrade = {
+          id: `paper-${signal.id}`,
+          symbol: signal.symbol,
+          side: signal.direction,
+          entryPrice: signal.entryPrice,
+          size: 0.001,
+          status: 'open',
+          openedAt: new Date().toISOString(),
+          confidence: signal.confidence,
+          source: 'signal-engine',
+        };
+        writePaperTrades([...trades, paperTrade]);
+        setSignals(prev => prev.map(s => s.id === signal.id ? { ...s, status: 'executed' } : s));
+        return;
+      }
+
+      const { apiKey, apiSecret } = getApiCredentials();
+      if (!apiKey || !apiSecret) {
+        throw new Error('Live trading credentials are not configured. Add them in Settings first.');
+      }
+
+      const size = 0.001;
+      const leverage = 5;
+      const recvWindow = '5000';
+      const orderSide = signal.direction === 'LONG' ? 'Buy' : 'Sell';
+      const leverageParams = `category=linear&symbol=${signal.symbol}&buyLeverage=${leverage}&sellLeverage=${leverage}`;
+      const leverageHeaders = await createBybitAuthHeaders(apiKey, apiSecret, leverageParams, recvWindow);
+
+      await fetch(`${BYBIT_BASE_URL}/v5/position/set-leverage`, {
+        method: 'POST',
+        headers: {
+          ...leverageHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          category: 'linear',
+          symbol: signal.symbol,
+          buyLeverage: leverage.toString(),
+          sellLeverage: leverage.toString(),
+        }),
+      });
+
+      const orderParams = `category=linear&symbol=${signal.symbol}&side=${orderSide}&orderType=Market&qty=${size}&timeInForce=GTC`;
+      const orderHeaders = await createBybitAuthHeaders(apiKey, apiSecret, orderParams, recvWindow);
+      const orderResponse = await fetch(`${BYBIT_BASE_URL}/v5/order/create`, {
+        method: 'POST',
+        headers: {
+          ...orderHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          category: 'linear',
+          symbol: signal.symbol,
+          side: orderSide,
+          orderType: 'Market',
+          qty: size.toString(),
+          timeInForce: 'GTC',
+        }),
+      });
+
+      const orderData = await safeJsonParse(orderResponse);
+      if (orderData?.retCode !== 0) {
+        throw new Error(orderData?.retMsg || 'Bybit rejected the order');
+      }
+
+      setSignals(prev => prev.map(s => s.id === signal.id ? { ...s, status: 'executed' } : s));
+    } catch (err: any) {
+      console.error('Signal execution failed:', err);
+      setError(err.message || 'Failed to execute signal');
+    } finally {
+      setExecutingSignalId(null);
+    }
   };
 
   const handleDeleteSignal = (id: string) => {
@@ -716,13 +806,22 @@ export default function SignalEnginePage() {
                           </button>
                           <div className="flex items-center gap-1 shrink-0">
                             {signal.status === 'pending' && (
-                              <button
-                                onClick={() => handleExecuteSignal(signal.id)}
-                                className="p-1.5 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-900/30 rounded transition-colors"
-                                title="Execute signal"
-                              >
-                                <CheckCircle size={14} />
-                              </button>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => void handleExecuteSignal(signal, 'paper')}
+                                  disabled={executingSignalId === signal.id}
+                                  className="px-2 py-1 text-[11px] font-semibold rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-60"
+                                >
+                                  {executingSignalId === signal.id ? <Loader2 size={12} className="animate-spin" /> : 'Paper'}
+                                </button>
+                                <button
+                                  onClick={() => void handleExecuteSignal(signal, 'live')}
+                                  disabled={executingSignalId === signal.id}
+                                  className="px-2 py-1 text-[11px] font-semibold rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-60"
+                                >
+                                  {executingSignalId === signal.id ? <Loader2 size={12} className="animate-spin" /> : 'Live'}
+                                </button>
+                              </div>
                             )}
                             <button
                               onClick={() => setExpandedId(isExpanded ? null : signal.id)}
